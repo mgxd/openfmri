@@ -331,7 +331,7 @@ def create_fs_reg_workflow(name='registration'):
     inputnode = Node(interface=IdentityInterface(fields=['source_files',
                                                          'mean_image',
                                                          'subject_id',
-                                                         'subjects_dir',
+                                                         'fs_dir',
                                                          'target_image']),
                      name='inputspec')
 
@@ -353,7 +353,7 @@ def create_fs_reg_workflow(name='registration'):
                     name='fssource')
     fssource.run_without_submitting = True
     register.connect(inputnode, 'subject_id', fssource, 'subject_id')
-    register.connect(inputnode, 'subjects_dir', fssource, 'subjects_dir')
+    register.connect(inputnode, 'fs_dir', fssource, 'subjects_dir')
 
     convert = Node(freesurfer.MRIConvert(out_type='nii'),
                    name="convert")
@@ -368,7 +368,7 @@ def create_fs_reg_workflow(name='registration'):
     bbregister.inputs.epi_mask = True
     register.connect(inputnode, 'subject_id', bbregister, 'subject_id')
     register.connect(inputnode, 'mean_image', bbregister, 'source_file')
-    register.connect(inputnode, 'subjects_dir', bbregister, 'subjects_dir')
+    register.connect(inputnode, 'fs_dir', bbregister, 'subjects_dir')
 
     # Create a mask of the median coregistered to the anatomical image
     mean2anat_mask = Node(fsl.BET(mask=True), name='mean2anat_mask')
@@ -391,7 +391,7 @@ def create_fs_reg_workflow(name='registration'):
     aparcxfm = Node(freesurfer.ApplyVolTransform(inverse=True,
                                                  interp='nearest'),
                     name='aparc_inverse_transform')
-    register.connect(inputnode, 'subjects_dir', aparcxfm, 'subjects_dir')
+    register.connect(inputnode, 'fs_dir', aparcxfm, 'subjects_dir')
     register.connect(bbregister, 'out_reg_file', aparcxfm, 'reg_file')
     register.connect(fssource, ('aparc_aseg', get_aparc_aseg),
                      aparcxfm, 'target_file')
@@ -528,7 +528,7 @@ def create_fs_reg_workflow(name='registration'):
 Get info for a given subject
 """
 
-def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
+def get_subjectinfo(subject_id, base_dir, task, model_id, session_id=None):
     """Get info for a given subject
     Parameters
     ----------
@@ -536,8 +536,8 @@ def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
         Subject identifier (e.g., sub001)
     base_dir : string
         Path to base directory of the dataset
-    task_id : int
-        Which task to process
+    task : str
+        Which task to process (task-%s)
     model_id : int
         Which model to process
     Returns
@@ -549,34 +549,32 @@ def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
     TR : float
         Repetition time
     """
-    from glob import glob
-    import os
-    import numpy as np
-    import re
     
     condition_info = []
     cond_file = os.path.join(base_dir, 'code', 'model', 'model%03d' % model_id,
-                                 'condition_key.txt') 
+                                 'condition_key.txt')
+ 
     with open(cond_file, 'rt') as fp:
         for line in fp:
             info = line.strip().split()
             condition_info.append([info[0], info[1], ' '.join(info[2:])])
+    
     if len(condition_info) == 0:
         raise ValueError('No condition info found in %s' % cond_file)
+        
     taskinfo = np.array(condition_info)
-    #n_tasks = np.unique(taskinfo[:, 0])
     n_tasks = []
     for x in taskinfo[:, 0]:
         if x not in n_tasks:
             n_tasks.append(x)
     conds = []
     run_ids = []
-    if task_id > len(n_tasks):
-        raise ValueError('Task id %s does not exist' % task_id)
-    for idx,task in enumerate(n_tasks):
-        taskidx = np.where(taskinfo[:, 0] == '%s'%(task))
+    if task not in n_tasks:
+        raise ValueError('Task id %s does not exist' % task)
+    for idx,taskname in enumerate(n_tasks):
+        taskidx = np.where(taskinfo[:, 0] == '%s'%(taskname))
         conds.append([condition.replace(' ', '_') for condition
-                      in taskinfo[taskidx[0], 2]]) # if 'junk' not in condition])
+                      in taskinfo[taskidx[0], 2]])
         if session_id:
             files = sorted(glob(os.path.join(base_dir,
                                              subject_id,
@@ -589,15 +587,17 @@ def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
                                              'func',
                                              '*%s*.nii.gz'%(task))))
             
-        runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
+        try:
+            runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
+        except AttributeError:
+            runs = [int(re.search('(?<=run)\d+',os.path.basename(val)).group(0)) for val in files]
         run_ids.insert(idx, runs)
-    # TR should be same across runs
     if session_id:
         json_info = glob(os.path.join(base_dir, subject_id, session_id, 
-                                      'func','*%s*.json'%(n_tasks[task_id-1])))[0]
+                                      'func','*%s*.json'%(task)))[0]
     else:    
         json_info = glob(os.path.join(base_dir, subject_id, 'func',
-                                     '*%s*.json'%(n_tasks[task_id-1])))[0]
+                                     '*%s*.json'%(task)))[0]
     if os.path.exists(json_info):
         import json
         with open(json_info, 'rt') as fp:
@@ -609,8 +609,8 @@ def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
             TR = np.genfromtxt(task_scan_key)[1]
         else:
             TR = np.genfromtxt(os.path.join(base_dir, 'scan_key.txt'))[1]
-    return run_ids[task_id - 1], conds[task_id - 1], TR
 
+    return run_ids[0], conds[n_tasks.index(task)], TR
 
 """
 Get taskname (could be incorporated into get_subjectinfo)
@@ -628,13 +628,93 @@ def get_taskname(base_dir, task_id):
                 return info[1]
 
 """
+Get info for topup correction
+"""
+
+def get_topup_info(layout, bold):
+    if 'epi' in layout.get_fieldmap(bold)['type']:
+    fmaps = layout.get_fieldmap(bold)['epi']
+    for fmap in fmaps:
+        if 'dir-AP' in fmap:
+            topup_AP = fmap
+        elif 'dir-PA' in fmap:
+            topup_PA = fmap
+        readout_topup = layout.get_metadata(fmap)['TotalReadoutTime']
+
+    orig_info = layout.get_metadata(bold)
+    num_slices, orig_pe_dir, readout = orig_info['dcmmeta_shape'][3], \
+    orig_info['PhaseEncodingDirection'], \
+    (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
+    return num_slices, orig_pe_dir, readout, topup_AP, topup_PA, readout_topup
+
+"""
 Analyzes an open fmri dataset
 """
 
-def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
+def create_workflow(args, workdir, outdir):
+    """
+    Set up BIDS components using pybids
+    """
+    if not os.path.exists(workdir):
+        os.makedirs(workdir)
+
+    new_subj_dir = os.path.join(workdir, 'subjects_dir')
+    if not os.path.exists(new_subj_dir):
+        os.mkdir(new_subj_dir)
+
+    subjs_to_analyze = []
+    if subject:
+        subjs_to_analyze = ['sub-{}'.format(val) for val in args.participant_label]
+    else:
+        subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
+        subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
+
+    # is this even needed?
+    contrast_file = os.path.join(data_dir, 'code', 'model', 'model%03d' % model_id,
+                                 'task_contrasts.txt')
+
+    # the master workflow, with subject specific inside
+    meta_wf = Workflow('meta_level')
+
+    for subj_label in subjs_to_analyze: #replacing infosource
+        subj_link = os.path.join(new_subj_dir, subj_label)
+        orig_dir = os.path.join(fs_dir, subj_label)
+        if not os.path.exists(orig_dir):
+            continue
+        if not os.path.islink(subj_link):
+            os.symlink(orig_dir, subj_link)
+        from bids.grabbids import BIDSLayout
+        layout = BIDSLayout(bids_dir)
+        
+        if task_id not in layout.get_tasks():
+            return
+
+        run_id, conds, TR = get_subjectinfo(subj_label, data_dir, 'task-%s'%(task_id), 
+                                            model_id, session_id)
+        # replacing datasource
+        bold_files = [f.filename for f in \
+                      layout.get(subject = subj_label.replace('sub-',''),
+                      type='bold', task=task_id, extensions=['nii.gz', 'nii'])]
+
+        anat_files = [f.filename for f in \
+                      layout.get(subject = subj_label.replace('sub-',''),
+                      type='T1w', extensions=['nii.gz', 'nii'])]
+
+        if do_topup:
+            num_slices, pe_key, readout, \
+            topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
+                                                               bold_files)
+        name = '{sub}_task-{task}'.format(sub=subj_label, task=task)
+
+        wf = create_workflow(**kwargs)
+        meta_wf.add_nodes([wf])
+    return meta_wf
+
+def analyze_bids_dataset(data_dir, subject=None, model_id=None,
                              task_id=None, output_dir=None, subj_prefix='*',
                              hpcutoff=120., use_derivatives=True,
-                             fwhm=6.0, subjects_dir=None, target=None):
+                             fwhm=6.0, fs_dir=None, target=None, 
+                             session_id=None):
     """Analyzes an open fmri dataset
 
     Parameters
@@ -654,7 +734,7 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
     preproc = create_featreg_preproc(whichvol='first')
     modelfit = create_modelfit_workflow()
     fixed_fx = create_fixed_effects_flow()
-    if subjects_dir:
+    if fs_dir:
         registration = create_fs_reg_workflow()
     else:
         registration = create_reg_workflow()
@@ -667,90 +747,17 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
     preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
                        preproc.get_node('outputspec'), 'motion_plots')
 
-    """
-    Set up openfmri data specific components
-    """
 
-    subjects = sorted([path.split(os.path.sep)[-1] for path in
-                       glob(os.path.join(data_dir, subj_prefix))])
 
-    infosource = pe.Node(niu.IdentityInterface(fields=['subject_id',
-                                                       'model_id',
-                                                       'task_id']),
-                         name='infosource')
-    if len(subject) == 0:
-        infosource.iterables = [('subject_id', subjects),
-                                ('model_id', [model_id]),
-                                ('task_id', task_id)]
-    else:
-        infosource.iterables = [('subject_id',
-                                 [subjects[subjects.index(subj)] for subj in subject]),
-                                ('model_id', [model_id]),
-                                ('task_id', task_id)]
-
-    subjinfo = pe.Node(niu.Function(input_names=['subject_id', 'base_dir',
-                                                 'task_id', 'model_id', 'session_id'],
-                                    output_names=['run_id', 'conds', 'TR'],
-                                    function=get_subjectinfo),
-                       name='subjectinfo')
-    subjinfo.inputs.base_dir = None ## update with argumentparse eventually
-    subjinfo.inputs.base_dir = data_dir
-
-    """
-    Get task name (BIDS)
-    """
-    taskname = pe.Node(niu.Function(input_names=['base_dir', 'task_id'],
-                                    output_names=['task_name'],
-                                    function=get_taskname),
-                       name='taskname')
-    taskname.inputs.base_dir = data_dir
-
-    """
-    Return data components as anat, bold and behav
-    """
     contrast_file = os.path.join(data_dir, 'code', 'model', 'model%03d' % model_id,
                                  'task_contrasts.txt')
+
     has_contrast = os.path.exists(contrast_file)
   
-    if has_contrast:
-        datasource = pe.Node(nio.DataGrabber(infields=['subject_id', 'run_id',
-                                                   'task_id', 'model_id', 'task_name'],
-                                         outfields=['anat', 'bold', 'behav',
-                                                    'contrasts']),
-                         name='datasource')
-    else:
-        datasource = pe.Node(nio.DataGrabber(infields=['subject_id', 'run_id',
-                                                   'task_id', 'model_id', 'task_name'],
-                                         outfields=['anat', 'bold', 'behav']),
-                         name='datasource')
-    datasource.inputs.base_directory = data_dir
-    datasource.inputs.template = '*'
-    
-########## 6/23/16 replace behav with events.tsv
-    if has_contrast:
-        datasource.inputs.field_template = {'anat': '%s/anat/*T1w.nii.gz',
-                                            'bold': '%s/func/*task-%s_*bold.nii.gz',
-                                            'behav': ('code/model/model%03d/onsets/%s/task%03d_'
-                                                      'run%03d/cond*.txt'), 
-                                            'contrasts': ('code/model/model%03d/'
-                                                          'task_contrasts.txt')}
-        datasource.inputs.template_args = {'anat': [['subject_id']],
-                                       'bold': [['subject_id', 'task_name']],
-                                       'behav': [['model_id', 'subject_id',
-                                                  'task_id', 'run_id']],
-                                       'contrasts': [['model_id']]}
-    else:
-        datasource.inputs.field_template = {'anat': '%s/anat/*T1w.nii.gz',
-                                            'bold': '%s/func/*task-%s_*bold.nii.gz',
-                                            'behav': ('code/model/model%03d/onsets/%s/task%03d_'
-                                                      'run%03d/cond*.txt')}
-        datasource.inputs.template_args = {'anat': [['subject_id']],
-                                       'bold': [['subject_id', 'task_name']],
-                                       'behav': [['model_id', 'subject_id',
-                                                  'task_id', 'run_id']]}
-
-    datasource.inputs.sort_filelist = True
-    
+    ## Removed infosource/datasource
+    ## Replace connections made to these nodes
+    ## In testing - 9/29/16
+    ## willitwork?
     
     """
     Create meta workflow
@@ -766,6 +773,9 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
     wf.connect(infosource, 'model_id', datasource, 'model_id')
     wf.connect(infosource, 'task_id', datasource, 'task_id')
     wf.connect(subjinfo, 'run_id', datasource, 'run_id')
+    if not (session_id is None):
+        datasource.inputs.session_id = session_id
+
     wf.connect([(datasource, preproc, [('bold', 'inputspec.func')]),
                 ])
 
@@ -922,9 +932,9 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
                 ])
 
     wf.connect(calc_median, 'median_file', registration, 'inputspec.mean_image')
-    if subjects_dir:
+    if fs_dir:
         wf.connect(infosource, 'subject_id', registration, 'inputspec.subject_id')
-        registration.inputs.inputspec.subjects_dir = subjects_dir
+        registration.inputs.inputspec.fs_dir = fs_dir
         registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
         if target:
             registration.inputs.inputspec.target_image = target
@@ -972,7 +982,7 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
     wf.connect(registration, 'outputspec.transformed_files',
                splitfunc, 'in_files')
 
-    if subjects_dir:
+    if fs_dir:
         get_roi_mean = pe.MapNode(fs.SegStats(default_color_table=True),
                                   iterfield=['in_file'], name='get_aparc_means')
         get_roi_mean.inputs.avgwf_txt_file = True
@@ -1084,7 +1094,7 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
     wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
     wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.anat2target')
     wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
-    if subjects_dir:
+    if fs_dir:
         wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
         wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
                                               ('summary_file', 'qa.tsnr.@summary')])])
@@ -1150,12 +1160,17 @@ if __name__ == '__main__':
                         help="Plugin to use")
     parser.add_argument("--plugin_args", dest="plugin_args",
                         help="Plugin arguments")
-    parser.add_argument("--sd", dest="subjects_dir",
+    parser.add_argument("--sd", dest="fs_dir",
                         help="FreeSurfer subjects directory (if available)")
     parser.add_argument("--target", dest="target_file",
                         help=("Target in MNI space. Best to use the MindBoggle "
                               "template - only used with FreeSurfer"
                               "OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz"))
+    parser.add_argument("--session_id", dest="session_id", default=None,
+                        help="Session id, ses-1")
+    parser.add_argument("--crashdump_dir", dest="crashdump_dir",
+                        help="Crashdump dir", default=None)
+
     args = parser.parse_args()
     outdir = args.outdir
     work_dir = os.getcwd()
@@ -1165,12 +1180,13 @@ if __name__ == '__main__':
         outdir = os.path.abspath(outdir)
     else:
         outdir = os.path.join(work_dir, 'output')
-    outdir = os.path.join(outdir, 'model%03d' % int(args.model),
-                          'task%03d' % int(args.task))
+    #outdir = os.path.join(outdir, 'model%03d' % int(args.model),
+    #                      'task%03d' % int(args.task)) 
+    #add at end
     derivatives = args.derivatives
     if derivatives is None:
        derivatives = False
-    wf = analyze_openfmri_dataset(data_dir=os.path.abspath(args.datasetdir),
+    wf = analyze_bids_dataset(data_dir=os.path.abspath(args.datasetdir),
                                   subject=args.subject,
                                   model_id=int(args.model),
                                   task_id=[int(args.task)],
@@ -1179,12 +1195,22 @@ if __name__ == '__main__':
                                   hpcutoff=args.hpfilter,
                                   use_derivatives=derivatives,
                                   fwhm=args.fwhm,
-                                  subjects_dir=args.subjects_dir,
-                                  target=args.target_file)
+                                  fs_dir=os.path.abspath(args.fs_dir),
+                                  target=args.target_file,
+                                  session_id=args.session_id)
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     wf.config['execution']['poll_sleep_duration'] = 2
     wf.base_dir = work_dir
+    
+    if not (args.crashdump_dir is None):
+        wf.config['execution']['crashdump_dir'] = args.crashdump_dir
+
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
+        #wf.run('SLURM', plugin_args={'sbatch_args': '-p om_interactive -N1 -c1','max_jobs':40}) 
         wf.run(args.plugin)
+
+
+
+
