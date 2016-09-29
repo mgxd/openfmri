@@ -652,9 +652,7 @@ Analyzes an open fmri dataset
 """
 
 def create_workflow(args, workdir, outdir):
-    """
-    Set up BIDS components using pybids
-    """
+    # todo: don't make fsdir necessary
     if not os.path.exists(workdir):
         os.makedirs(workdir)
 
@@ -670,7 +668,7 @@ def create_workflow(args, workdir, outdir):
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
     # is this even needed?
-    contrast_file = os.path.join(data_dir, 'code', 'model', 'model%03d' % model_id,
+    contrast_file = os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(model_id),
                                  'task_contrasts.txt')
 
     # the master workflow, with subject specific inside
@@ -687,9 +685,10 @@ def create_workflow(args, workdir, outdir):
         layout = BIDSLayout(bids_dir)
         
         if task_id not in layout.get_tasks():
+            print('task-{} is not found in your dataset'.format(task_id))
             return
 
-        run_id, conds, TR = get_subjectinfo(subj_label, data_dir, 'task-%s'%(task_id), 
+        run_id, conds, TR = get_subjectinfo(subj_label, data_dir, 'task-{}'.format(task_id), 
                                             model_id, session_id)
         # replacing datasource
         bold_files = [f.filename for f in \
@@ -704,9 +703,17 @@ def create_workflow(args, workdir, outdir):
             num_slices, pe_key, readout, \
             topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
                                                                bold_files)
-        name = '{sub}_task-{task}'.format(sub=subj_label, task=task)
-
-        wf = create_workflow(**kwargs)
+        name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
+        kwargs = dict(files=files,
+                      target=target,
+                      subject_id=subj_label,
+                      TR=TR,
+                      fs_dir=fs_dir
+                      fwhm=args.fwhm,
+                      outdir=os.path.join(out_dir, subj_label, task_id),
+                      name=name)
+                      
+        wf = analyze_bids_dataset(**kwargs)
         meta_wf.add_nodes([wf])
     return meta_wf
 
@@ -714,7 +721,8 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
                              task_id=None, output_dir=None, subj_prefix='*',
                              hpcutoff=120., use_derivatives=True,
                              fwhm=6.0, fs_dir=None, target=None, 
-                             session_id=None):
+                             session_id=None,
+                             name=name):
     """Analyzes an open fmri dataset
 
     Parameters
@@ -758,23 +766,6 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
     ## Replace connections made to these nodes
     ## In testing - 9/29/16
     ## willitwork?
-    
-    """
-    Create meta workflow
-    """
-
-    wf = pe.Workflow(name='bids')
-    wf.connect(infosource, 'subject_id', subjinfo, 'subject_id')
-    wf.connect(infosource, 'model_id', subjinfo, 'model_id')
-    wf.connect(infosource, 'task_id', subjinfo, 'task_id')
-    wf.connect(infosource, 'task_id', taskname, 'task_id')
-    wf.connect(taskname, 'task_name', datasource, 'task_name')
-    wf.connect(infosource, 'subject_id', datasource, 'subject_id')
-    wf.connect(infosource, 'model_id', datasource, 'model_id')
-    wf.connect(infosource, 'task_id', datasource, 'task_id')
-    wf.connect(subjinfo, 'run_id', datasource, 'run_id')
-    if not (session_id is None):
-        datasource.inputs.session_id = session_id
 
     wf.connect([(datasource, preproc, [('bold', 'inputspec.func')]),
                 ])
@@ -1144,7 +1135,7 @@ if __name__ == '__main__':
     parser.add_argument('-x', '--subjectprefix', default='sub*',
                         help="Subject prefix" + defstr)
     parser.add_argument('-t', '--task', default=1, #nargs='+',
-                        type=int, help="Task index" + defstr)
+                        type=str, help="Task name" + defstr)
     parser.add_argument('--hpfilter', default=120.,
                         type=float, help="High pass filter cutoff (in secs)" + defstr)
     parser.add_argument('--fwhm', default=6.,
@@ -1180,27 +1171,30 @@ if __name__ == '__main__':
         outdir = os.path.abspath(outdir)
     else:
         outdir = os.path.join(work_dir, 'output')
-    #outdir = os.path.join(outdir, 'model%03d' % int(args.model),
-    #                      'task%03d' % int(args.task)) 
-    #add at end
+
     derivatives = args.derivatives
     if derivatives is None:
        derivatives = False
-    wf = analyze_bids_dataset(data_dir=os.path.abspath(args.datasetdir),
-                                  subject=args.subject,
-                                  model_id=int(args.model),
-                                  task_id=[int(args.task)],
-                                  subj_prefix=args.subjectprefix,
-                                  output_dir=outdir,
-                                  hpcutoff=args.hpfilter,
-                                  use_derivatives=derivatives,
-                                  fwhm=args.fwhm,
-                                  fs_dir=os.path.abspath(args.fs_dir),
-                                  target=args.target_file,
-                                  session_id=args.session_id)
-    #wf.config['execution']['remove_unnecessary_outputs'] = False
-    wf.config['execution']['poll_sleep_duration'] = 2
+
+    wf = create_workflow(args, work_dir, out_dir)
     wf.base_dir = work_dir
+
+    #wf = analyze_bids_dataset(data_dir=os.path.abspath(args.datasetdir),
+    #                              subject=args.subject,
+    #                              model_id=int(args.model),
+    #                              task_id=,
+    #                              subj_prefix=args.subjectprefix,
+    #                              output_dir=outdir,
+    #                              hpcutoff=args.hpfilter,
+    #                              use_derivatives=derivatives,
+    #                              fwhm=args.fwhm,
+    #                              fs_dir=os.path.abspath(args.fs_dir),
+    #                              target=args.target_file,
+    #                              session_id=args.session_id)
+    
+    # Optional changes
+    #wf.config['execution']['remove_unnecessary_outputs'] = False
+    #wf.config['execution']['poll_sleep_duration'] = 2
     
     if not (args.crashdump_dir is None):
         wf.config['execution']['crashdump_dir'] = args.crashdump_dir
@@ -1208,7 +1202,6 @@ if __name__ == '__main__':
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
-        #wf.run('SLURM', plugin_args={'sbatch_args': '-p om_interactive -N1 -c1','max_jobs':40}) 
         wf.run(args.plugin)
 
 
