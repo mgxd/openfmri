@@ -3,13 +3,13 @@
 # vi: set ft=python sts=4 ts=4 sw=4 et:
 """
 =============================================
-fMRI: OpenfMRI.org data, FSL, ANTS, c3daffine
+fMRI: BIDS data, FSL, ANTS, c3daffine
 =============================================
 
 A growing number of datasets are available on `OpenfMRI <http://openfmri.org>`_.
-This script demonstrates how to use nipype to analyze a data set::
+This script demonstrates how to use nipype to analyze a BIDS data set::
 
-    python fmri_ants_openfmri.py --datasetdir ds107
+    python fmri_ants_bids.py /path/to/bids/dir
 """
 
 from nipype import config
@@ -613,45 +613,34 @@ def get_subjectinfo(subject_id, base_dir, task, model_id, session_id=None):
     return run_ids[0], conds[n_tasks.index(task)], TR
 
 """
-Get taskname (could be incorporated into get_subjectinfo)
-"""
-def get_taskname(base_dir, task_id):
-    import os
-    task_key = os.path.join(base_dir, 'code', 'task_key.txt')
-    if not os.path.exists(task_key):
-        return
-    
-    with open(task_key, 'rt') as fp:
-        for line in fp:
-            info = line.strip().split()
-            if 'task%03d'%(task_id) in info:
-                return info[1]
-
-"""
 Get info for topup correction
 """
 
-def get_topup_info(layout, bold):
-    if 'epi' in layout.get_fieldmap(bold)['type']:
-    fmaps = layout.get_fieldmap(bold)['epi']
-    for fmap in fmaps:
-        if 'dir-AP' in fmap:
-            topup_AP = fmap
-        elif 'dir-PA' in fmap:
-            topup_PA = fmap
-        readout_topup = layout.get_metadata(fmap)['TotalReadoutTime']
-
-    orig_info = layout.get_metadata(bold)
-    num_slices, orig_pe_dir, readout = orig_info['dcmmeta_shape'][3], \
-    orig_info['PhaseEncodingDirection'], \
+def get_topup_info(layout, bold_files):
+    # same across runs so just get once
+    if 'epi' in layout.get_fieldmap(bold_files[0])['type']:
+        fmaps = layout.get_fieldmap(bold_files[0])['epi']
+        for fmap in fmaps:
+            if 'dir-AP' in fmap:
+                topup_AP = fmap
+            elif 'dir-PA' in fmap:
+                topup_PA = fmap
+            readout_topup = layout.get_metadata(fmap)['TotalReadoutTime']
+    # metainfo
+    orig_info = layout.get_metadata(bold_files[0])
+    num_slices, readout = orig_info['dcmmeta_shape'][3], \
     (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
-    return num_slices, orig_pe_dir, readout, topup_AP, topup_PA, readout_topup
+    # keep track of directions
+    pe_key = {}
+    for i,bold in enumerate(bold_files,1):
+        pe_key[i] = layout.get_metadata(bold)['PhaseEncodingDirection']
+        
+    return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
 
 """
 Analyzes an open fmri dataset
 """
-
-def create_workflow(args, workdir, outdir):
+def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     # todo: don't make fsdir necessary
     if not os.path.exists(workdir):
         os.makedirs(workdir)
@@ -662,13 +651,13 @@ def create_workflow(args, workdir, outdir):
 
     subjs_to_analyze = []
     if subject:
-        subjs_to_analyze = ['sub-{}'.format(val) for val in args.participant_label]
+        subjs_to_analyze = ['sub-{}'.format(val) for val in args.subject]
     else:
         subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
     # is this even needed?
-    contrast_file = os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(model_id),
+    contrast_file = os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(args.model),
                                  'task_contrasts.txt')
 
     # the master workflow, with subject specific inside
@@ -688,7 +677,7 @@ def create_workflow(args, workdir, outdir):
             print('task-{} is not found in your dataset'.format(task_id))
             return
 
-        run_id, conds, TR = get_subjectinfo(subj_label, data_dir, 'task-{}'.format(task_id), 
+        run_id, conds, TR = get_subjectinfo(subj_label, bids_dir, 'task-{}'.format(task_id), 
                                             model_id, session_id)
         # replacing datasource
         bold_files = [f.filename for f in \
@@ -699,26 +688,33 @@ def create_workflow(args, workdir, outdir):
                       layout.get(subject = subj_label.replace('sub-',''),
                       type='T1w', extensions=['nii.gz', 'nii'])]
 
-        if do_topup:
-            num_slices, pe_key, readout, \
-            topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
-                                                               bold_files)
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
         kwargs = dict(files=files,
                       target=target,
                       subject_id=subj_label,
+                      task_id=task_id,
+                      model_id=model_id,
                       TR=TR,
-                      fs_dir=fs_dir
+                      fs_dir=fs_dir,
+                      hpcutoff=args.hpfilter,
                       fwhm=args.fwhm,
-                      outdir=os.path.join(out_dir, subj_label, task_id),
+                      contrast=contrast_file,
+                      use_derivatives=derivatives,
+                      outdir=os.path.join(out_dir, subj_label, args.task),
                       name=name)
+        if do_topup:
+            num_slices, pe_key, readout, \
+            topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
+                                                               bold_files)
+
+            # add topup vars to kwargs
                       
         wf = analyze_bids_dataset(**kwargs)
         meta_wf.add_nodes([wf])
     return meta_wf
 
 def analyze_bids_dataset(data_dir, subject=None, model_id=None,
-                             task_id=None, output_dir=None, subj_prefix='*',
+                             task_id=None, output_dir=None,
                              hpcutoff=120., use_derivatives=True,
                              fwhm=6.0, fs_dir=None, target=None, 
                              session_id=None,
@@ -1134,7 +1130,7 @@ if __name__ == '__main__':
                         help="Model index" + defstr)
     parser.add_argument('-x', '--subjectprefix', default='sub*',
                         help="Subject prefix" + defstr)
-    parser.add_argument('-t', '--task', default=1, #nargs='+',
+    parser.add_argument('-t', '--task', required=True, #nargs='+',
                         type=str, help="Task name" + defstr)
     parser.add_argument('--hpfilter', default=120.,
                         type=float, help="High pass filter cutoff (in secs)" + defstr)
@@ -1163,7 +1159,8 @@ if __name__ == '__main__':
                         help="Crashdump dir", default=None)
 
     args = parser.parse_args()
-    outdir = args.outdir
+    data_dir = os.path.abspath(args.datasetdir)
+    out_dir = args.outdir
     work_dir = os.getcwd()
     if args.work_dir:
         work_dir = os.path.abspath(args.work_dir)
@@ -1176,21 +1173,14 @@ if __name__ == '__main__':
     if derivatives is None:
        derivatives = False
 
-    wf = create_workflow(args, work_dir, out_dir)
-    wf.base_dir = work_dir
+    fs_dir = args.fs_dir
+    if fs_dir is not None:
+        fs_dir = os.path.abspath(fs_dir)
 
-    #wf = analyze_bids_dataset(data_dir=os.path.abspath(args.datasetdir),
-    #                              subject=args.subject,
-    #                              model_id=int(args.model),
-    #                              task_id=,
-    #                              subj_prefix=args.subjectprefix,
-    #                              output_dir=outdir,
-    #                              hpcutoff=args.hpfilter,
-    #                              use_derivatives=derivatives,
-    #                              fwhm=args.fwhm,
-    #                              fs_dir=os.path.abspath(args.fs_dir),
-    #                              target=args.target_file,
-    #                              session_id=args.session_id)
+    wf = create_workflow(data_dir, args, 
+                         fs_dir, derivatives,
+                         work_dir, out_dir)
+    wf.base_dir = work_dir
     
     # Optional changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
