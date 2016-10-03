@@ -656,9 +656,10 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
-    # is this even needed?
-    contrast_file = os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(args.model),
-                                 'task_contrasts.txt')
+    # is this even needed? yes
+    old_model_dir = os.path.join(os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(args.model)))
+
+    contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
 
     # the master workflow, with subject specific inside
     meta_wf = Workflow('meta_level')
@@ -684,41 +685,65 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       layout.get(subject = subj_label.replace('sub-',''),
                       type='bold', task=task_id, extensions=['nii.gz', 'nii'])]
 
-        anat_files = [f.filename for f in \
-                      layout.get(subject = subj_label.replace('sub-',''),
-                      type='T1w', extensions=['nii.gz', 'nii'])]
+        anat = [f.filename for f in \
+                layout.get(subject = subj_label.replace('sub-',''),
+                type='T1w', extensions=['nii.gz', 'nii'])][0]
+
+        #use events.tsv eventually
+        behav = [x for x in glob(
+            os.path.join(old_model_dir, 'onsets', subj_label,
+                         'task-{}*'.format(task_id), 'cond*.txt'))
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
-        kwargs = dict(files=files,
+        kwargs = dict(bold_files=bold_files,
+                      anat=anat,
                       target=target,
                       subject_id=subj_label,
                       task_id=task_id,
                       model_id=model_id,
                       TR=TR,
+                      behav=behav,
                       fs_dir=fs_dir,
+                      conds=conds,
+                      run_id=run_id,
                       hpcutoff=args.hpfilter,
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
                       outdir=os.path.join(out_dir, subj_label, args.task),
                       name=name)
+
+        print(kwargs)
+
         if do_topup:
             num_slices, pe_key, readout, \
             topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
                                                                bold_files)
 
             # add topup vars to kwargs
+
                       
         wf = analyze_bids_dataset(**kwargs)
         meta_wf.add_nodes([wf])
     return meta_wf
 
-def analyze_bids_dataset(data_dir, subject=None, model_id=None,
-                             task_id=None, output_dir=None,
-                             hpcutoff=120., use_derivatives=True,
-                             fwhm=6.0, fs_dir=None, target=None, 
-                             session_id=None,
-                             name=name):
+def analyze_bids_dataset(bold_files, 
+                         anat, 
+                         target, 
+                         subject_id, 
+                         task_id, 
+                         model_id, 
+                         TR, 
+                         behav,
+                         fs_dir=None, 
+                         conds=None,
+                         run_id=None,
+                         hpcutoff=120., 
+                         fwhm=6., 
+                         contrast=None,
+                         use_derivatives=True, 
+                         outdir=None, 
+                         name=name):
     """Analyzes an open fmri dataset
 
     Parameters
@@ -751,35 +776,31 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
     preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
                        preproc.get_node('outputspec'), 'motion_plots')
 
-
-
-    contrast_file = os.path.join(data_dir, 'code', 'model', 'model%03d' % model_id,
-                                 'task_contrasts.txt')
-
-    has_contrast = os.path.exists(contrast_file)
-  
     ## Removed infosource/datasource
     ## Replace connections made to these nodes
     ## In testing - 9/29/16
     ## willitwork?
 
-    wf.connect([(datasource, preproc, [('bold', 'inputspec.func')]),
-                ])
-
+    preproc.inputspec.func = bold_files
+    
     def get_highpass(TR, hpcutoff):
         return hpcutoff / (2 * TR)
     gethighpass = pe.Node(niu.Function(input_names=['TR', 'hpcutoff'],
                                        output_names=['highpass'],
                                        function=get_highpass),
                           name='gethighpass')
-    wf.connect(subjinfo, 'TR', gethighpass, 'TR')
+    gethighpass.inputs.TR = TR
+    gethighpass.inputs.hpcutoff = hpcutoff
+    
+    # make the workflow
+    wf = Workflow(name=name)
     wf.connect(gethighpass, 'highpass', preproc, 'inputspec.highpass')
 
     """
     Setup a basic set of contrasts, a t-test per condition
     """
 
-    def get_contrasts(contrast_file, task_name, conds):
+    def get_contrasts(contrast_file, task_id, conds):
         import numpy as np
         import os
         contrast_def = []
@@ -788,7 +809,7 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
                 contrast_def.extend([np.array(row.split()) for row in fp.readlines() if row.strip()])
         contrasts = []
         for row in contrast_def:
-            if row[0] != 'task-%s' % task_name:
+            if row[0] != 'task-%s' % task_id:
                 continue
             con = [row[1], 'T', ['cond%03d' % (i + 1)  for i in range(len(conds))],
                    row[2:].astype(float).tolist()]
@@ -800,10 +821,14 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
         return contrasts
 
     contrastgen = pe.Node(niu.Function(input_names=['contrast_file',
-                                                    'task_name', 'conds'],
+                                                    'task_id', 'conds'],
                                        output_names=['contrasts'],
                                        function=get_contrasts),
                           name='contrastgen')
+
+    contrastgen.inputs.contrast_file = contrast
+    contrastgen.inputs.task_id = task_id
+    contrastgen.inputs.conds = conds
 
     art = pe.MapNode(interface=ra.ArtifactDetect(use_differences=[True, False],
                                                  use_norm=True,
@@ -818,6 +843,7 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
     modelspec = pe.Node(interface=model.SpecifyModel(),
                            name="modelspec")
     modelspec.inputs.input_units = 'secs'
+    modelspec.inputs.time_reptition = TR
 
     def check_behav_list(behav, run_id, conds):
         import six
@@ -833,20 +859,14 @@ def analyze_bids_dataset(data_dir, subject=None, model_id=None,
                                        output_names=['behav'],
                                        function=check_behav_list),
                           name='reshape_behav')
+    reshape_behav.inputs.behav = behav
+    reshape_behav.inputs.run_id = run_id
+    reshape_behav.inputs.conds = conds
 
-    wf.connect(subjinfo, 'TR', modelspec, 'time_repetition')
-    wf.connect(datasource, 'behav', reshape_behav, 'behav')
-    wf.connect(subjinfo, 'run_id', reshape_behav, 'run_id')
-    wf.connect(subjinfo, 'conds', reshape_behav, 'conds')
     wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
 
-    wf.connect(subjinfo, 'TR', modelfit, 'inputspec.interscan_interval')
-    wf.connect(subjinfo, 'conds', contrastgen, 'conds')
-    if has_contrast:
-        wf.connect(datasource, 'contrasts', contrastgen, 'contrast_file')
-    else:
-        contrastgen.inputs.contrast_file = ''
-    wf.connect(taskname, 'task_name', contrastgen, 'task_name')
+    modelfit.inputspec.interscan_interval = TR
+
     wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
 
     wf.connect([(preproc, art, [('outputspec.motion_parameters',
@@ -1147,7 +1167,7 @@ if __name__ == '__main__':
                         help="Plugin to use")
     parser.add_argument("--plugin_args", dest="plugin_args",
                         help="Plugin arguments")
-    parser.add_argument("--sd", dest="fs_dir",
+    parser.add_argument("--sd", dest="fs_dir", default=None,
                         help="FreeSurfer subjects directory (if available)")
     parser.add_argument("--target", dest="target_file",
                         help=("Target in MNI space. Best to use the MindBoggle "
