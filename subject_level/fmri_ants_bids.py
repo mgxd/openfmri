@@ -524,6 +524,146 @@ def create_fs_reg_workflow(name='registration'):
     return register
 
 
+def create_topup_workflow(num_slices, pe_key, readout, 
+                          readout_topup, name='topup'):
+    """Create a geometric distortion correction workflow using TOPUP 
+    Parameters
+    ----------
+    name : name of workflow (default: 'topup')
+    Inputs::
+        inputspec.realigned_files : realigned resting state time series files
+        inputspec.ref_file : reference image to register TOPUP images to realigned files
+        inputspec.topup_AP : merged TOPUP images in AP phase-encoding direction
+        inputspec.topup_PA : merged TOPUP images in PA phase-encoding direction
+    Outputs::
+        outputspec.topup_encoding_file : acquisition parameter text file for TOPUP files
+        outputspec.rest_encoding_file : acquisition parameter text file for rest file
+        outputspec.topup_fieldcoef : spline coefficients encoding the off-resonance field
+        outputspec.topup_movpar : TOPUP movement parameters output file 
+        outputspec.topup_corrected : corrected TOPUP file
+        outputspec.applytopup_corrected : corrected resting state time series 
+    """
+
+    topup = Workflow(name=name)
+
+    inputnode = Node(interface=IdentityInterface(fields=['realigned_files',
+                                                         'ref_file',
+                                                         'topup_AP',
+                                                         'topup_PA',
+                                                         ]),
+                     name='inputspec')
+
+    outputnode = Node(interface=IdentityInterface(fields=['topup_encoding_file',
+                                                          'rest_encoding_file',
+                                                          'topup_fieldcoef',
+                                                          'topup_movpar',
+                                                          'topup_corrected',
+                                                          'applytopup_corrected'
+                                                          ]),
+                      name='outputspec')
+
+    pe_dirs = {'j-':-1, 'j':1} #AP:-1 PA:1
+
+    opp_key = {}
+    for run in pe_key:
+        opp_pe = [x for x in key.keys() if x != totest[run]][0]
+        opp_key[run] = opp_pe
+
+    topup2median = MapNode(fsl.FLIRT(out_file='%s2median.nii.gz' % rest_pe_dir, 
+                                  output_type='NIFTI_GZ', interp='spline'), 
+                        name='%s2median' % rest_pe_dir)
+    topup2median.inputs.dof = 6
+    topup2median.inputs.out_matrix_file = '%s2median' % rest_pe_dir
+
+    applyxfm = Node(fsl.ApplyXfm(out_file='%s2median.nii.gz' % opp_pe_dir, 
+                                 apply_xfm=True, interp='spline', output_type='NIFTI_GZ'),
+                    name='applyxfm')        
+    topup.connect(topup2median, 'out_matrix_file', applyxfm, 'in_matrix_file')
+
+    make_topup_list = Node(Merge(2), name='make_topup_list')
+    topup.connect(topup2median, 'out_file', make_topup_list, 'in1')
+    topup.connect(applyxfm, 'out_file', make_topup_list, 'in2')
+
+    merge_topup = Node(fsl.Merge(dimension='t', output_type='NIFTI_GZ'), 
+                        name='merge_topup')
+    topup.connect(make_topup_list, 'out', merge_topup, 'in_files')
+
+    file_writer_topup = Node(Function(input_names=['readout', 'fname',
+                                                   'direction'],
+                                output_names=['encoding_file'],
+                                function=write_encoding_file),
+                       name='file_writer_topup')
+    file_writer_topup.inputs.readout = readout_topup
+    file_writer_topup.inputs.fname = 'topup'
+    file_writer_topup.inputs.direction = pe_dirs[rest_pe_dir]
+
+    run_topup = Node(fsl.TOPUP(out_corrected='b0correct.nii.gz', numprec='float', 
+                        config='b02b0.cnf', output_type='NIFTI_GZ'), 
+                    name='run_topup')
+    topup.connect(file_writer_topup, 'encoding_file', run_topup, 'encoding_file')
+
+    applytopup = Node(fsl.ApplyTOPUP(output_type='NIFTI_GZ'), name='applytopup')
+    applytopup.inputs.in_index = [1]
+    applytopup.inputs.method = 'jac'   
+
+    file_writer_ts = file_writer_topup.clone(name='file_writer_ts')
+    file_writer_ts.inputs.readout = readout
+    file_writer_ts.inputs.fname = 'rest_ts'
+
+    topup.connect(merge_topup, 'merged_file', run_topup, 'in_file')
+    topup.connect(file_writer_ts, 'encoding_file', applytopup, 'encoding_file')
+    topup.connect(run_topup, 'out_fieldcoef', applytopup, 'in_topup_fieldcoef')
+    topup.connect(run_topup, 'out_movpar', applytopup, 'in_topup_movpar')
+
+    if num_slices % 2 != 0:    
+
+        rm_slice_ts = Node(fsl.ExtractROI(), name='rm_slice_ts')        
+        rm_slice_ts.inputs.crop_list = [(0,-1), (0,-1), (0, num_slices-1), (0,-1)]
+
+        rm_slice_ref = Node(fsl.ExtractROI(), name='rm_slice_ref') 
+        rm_slice_ref.inputs.crop_list = [(0,-1),(0,-1),(0, num_slices-1),(0,1)]
+
+        extract_main = rm_slice_ref.clone(name='extract_%s' % rest_pe_dir) 
+
+        extract_opp = extract_main.clone(name='extract_%s' % opp_pe_dir)  
+
+        topup.connect([(inputnode, rm_slice_ts, [('realigned_files', 'in_file')]),
+                     (rm_slice_ts, applytopup, [('roi_file', 'in_files')]),
+                     (inputnode, rm_slice_ref, [('ref_file', 'in_file')]),
+                     (rm_slice_ref, topup2median, [('roi_file', 'reference')]),
+                     (rm_slice_ref, applyxfm, [('roi_file', 'reference')])
+                     ])
+
+    else:
+        topup.connect([(inputnode, applytopup, [('realigned_files', 'in_files')]),
+                     (inputnode, topup2median, [('ref_file', 'reference')]),
+                     (inputnode, applyxfm, [('ref_file', 'reference')])])
+
+        extract_main = Node(fsl.ExtractROI(), name='extract_%s' % rest_pe_dir) 
+        extract_main.inputs.crop_list = [(0,-1), (0,-1), (0,-1), (0,1)]
+
+        extract_opp = extract_main.clone(name='extract_%s' % opp_pe_dir)
+
+    if rest_pe_dir == 'AP':
+        topup.connect(inputnode, 'topup_AP', extract_main, 'in_file')
+        topup.connect(inputnode, 'topup_PA', extract_opp, 'in_file')
+    elif rest_pe_dir == 'PA':
+        topup.connect(inputnode, 'topup_PA', extract_main, 'in_file')
+        topup.connect(inputnode, 'topup_AP', extract_opp, 'in_file')
+
+    topup.connect(extract_main, 'roi_file', topup2median, 'in_file')
+    topup.connect(extract_opp, 'roi_file', applyxfm, 'in_file')
+
+    topup.connect(file_writer_topup, 'encoding_file', outputnode, 'topup_encoding_file')
+    topup.connect(file_writer_ts, 'encoding_file', outputnode, 'rest_encoding_file')
+    topup.connect(run_topup, 'out_fieldcoef', outputnode, 'topup_fieldcoef')
+    topup.connect(run_topup, 'out_movpar', outputnode, 'topup_movpar')
+    topup.connect(run_topup, 'out_corrected', outputnode, 'topup_corrected')
+    topup.connect(applytopup, 'out_corrected', outputnode, 'applytopup_corrected')
+
+    return topup
+
+
 """
 Get info for a given subject
 """
@@ -695,6 +835,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                          'task-{}*'.format(task_id), 'cond*.txt'))
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
+
+
         kwargs = dict(bold_files=bold_files,
                       anat=anat,
                       target=target,
@@ -713,15 +855,19 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       outdir=os.path.join(out_dir, subj_label, args.task),
                       name=name)
 
-        print(kwargs)
-
         if do_topup:
             num_slices, pe_key, readout, \
             topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
                                                                bold_files)
 
-            # add topup vars to kwargs
+            topup_kwargs = dict(num_slices=num_slices,
+                                pe_key=pe_key,
+                                readout=readout,
+                                topup_AP=topup_AP,
+                                topup_PA=topup_PA,
+                                readout_topup=readout_topup)
 
+            kwargs = dict(kwargs.items() + topup_kwargs.items())
                       
         wf = analyze_bids_dataset(**kwargs)
         meta_wf.add_nodes([wf])
@@ -741,9 +887,16 @@ def analyze_bids_dataset(bold_files,
                          hpcutoff=120., 
                          fwhm=6., 
                          contrast=None,
-                         use_derivatives=True, 
+                         use_derivatives=True,
+                         num_slices=None,
+                         pe_key=None,
+                         readout=None,
+                         topup_AP=None,
+                         topup_PA=None,
+                         readout_topup=None, 
                          outdir=None, 
                          name=name):
+
     """Analyzes an open fmri dataset
 
     Parameters
@@ -775,12 +928,6 @@ def analyze_bids_dataset(bold_files,
 
     preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
                        preproc.get_node('outputspec'), 'motion_plots')
-
-    ## Removed infosource/datasource
-    ## Replace connections made to these nodes
-    ## In testing - 9/29/16
-    ## willitwork?
-
     preproc.inputspec.func = bold_files
     
     def get_highpass(TR, hpcutoff):
@@ -887,7 +1034,6 @@ def analyze_bids_dataset(bold_files,
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
     tsnr = MapNode(TSNR(regress_poly=2), iterfield=['in_file'], name='tsnr')
-    wf.connect(preproc, "outputspec.realigned_files", tsnr, "in_file")
     tsnr.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=16G -c 4'}
 
@@ -897,8 +1043,23 @@ def analyze_bids_dataset(bold_files,
                                 function=median,
                                 imports=imports),
                        name='median')
-    wf.connect(tsnr, 'detrended_file', calc_median, 'in_files')
+    # regardless of topup
+    recalc_median = calc_median.clone(name='recalc_median')
 
+    if topup_AP:
+        topup = create_topup_workflow(num_slices, pe_key, readout, 
+                                      readout_topup, name='topup')
+        topup.inputs.inputspec.topup_AP = topup_AP
+        topup.inputs.inputspec.topup_PA = topup_PA
+        wf.connect(preproc, 'outputspec.realigned_files', topup, 'inputspec.realigned_files')
+        wf.connect(preproc, 'outputspec.realigned_files', calc_median, 'in_files')
+        wf.connect(calc_median, 'median_file', topup, 'inputspec.ref_file')
+        wf.connect(topup, 'outputspec.applytopup_corrected', tsnr, 'in_file')
+        wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
+    else:
+        wf.connect(preproc, "outputspec.realigned_files", tsnr, "in_file")
+        wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
+   
     """
     Reorder the copes so that now it combines across runs
     """
@@ -1174,7 +1335,7 @@ if __name__ == '__main__':
                               "template - only used with FreeSurfer"
                               "OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz"))
     parser.add_argument("--session_id", dest="session_id", default=None,
-                        help="Session id, ses-1")
+                        help="Session id, ex. 'ses-1'")
     parser.add_argument("--crashdump_dir", dest="crashdump_dir",
                         help="Crashdump dir", default=None)
 
@@ -1182,12 +1343,17 @@ if __name__ == '__main__':
     data_dir = os.path.abspath(args.datasetdir)
     out_dir = args.outdir
     work_dir = os.getcwd()
+
     if args.work_dir:
         work_dir = os.path.abspath(args.work_dir)
     if outdir:
         outdir = os.path.abspath(outdir)
     else:
         outdir = os.path.join(work_dir, 'output')
+    if args.crashdump_dir:
+        crashdump = os.path.abspath(args.crashdump_dir)
+    else:
+        crashdump = os.getcwd()
 
     derivatives = args.derivatives
     if derivatives is None:
