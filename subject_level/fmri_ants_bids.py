@@ -736,6 +736,7 @@ def get_subjectinfo(subject_id, base_dir, task, model_id, session_id=None):
         with open(json_info, 'rt') as fp:
             data = json.load(fp)
             TR = data['RepetitionTime']
+            slice_times = data['SliceTiming']
     else:
         task_scan_key = os.path.join(base_dir, 'code', 'scan_key.txt')
         if os.path.exists(task_scan_key):
@@ -743,7 +744,7 @@ def get_subjectinfo(subject_id, base_dir, task, model_id, session_id=None):
         else:
             TR = np.genfromtxt(os.path.join(base_dir, 'scan_key.txt'))[1]
 
-    return run_ids[0], conds[n_tasks.index(task)], TR
+    return run_ids[0], conds[n_tasks.index(task)], TR, slice_times
 
 """
 Get info for topup correction
@@ -790,7 +791,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
     # is this even needed? yes
-    old_model_dir = os.path.join(os.path.join(data_dir, 'code', 'model', 'model{:03d}'.format(args.model)))
+    old_model_dir = os.path.join(os.path.join(data_dir, 'code', 'model', 
+                                              'model{:03d}'.format(args.model)))
 
     contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
 
@@ -811,8 +813,9 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             print('task-{} is not found in your dataset'.format(task_id))
             return
 
-        run_id, conds, TR = get_subjectinfo(subj_label, bids_dir, 'task-{}'.format(task_id), 
-                                            model_id, session_id)
+        run_id, conds, TR, slice_times = get_subjectinfo(subj_label, bids_dir, 
+                                                         'task-{}'.format(task_id), 
+                                                         model_id, session_id)
         # replacing datasource
         bold_files = [f.filename for f in \
                       layout.get(subject = subj_label.replace('sub-',''),
@@ -837,6 +840,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       task_id=task_id,
                       model_id=model_id,
                       TR=TR,
+                      slice_times=slice_times,
                       behav=behav,
                       fs_dir=fs_dir,
                       conds=conds,
@@ -872,7 +876,8 @@ def analyze_bids_dataset(bold_files,
                          subject_id, 
                          task_id, 
                          model_id, 
-                         TR, 
+                         TR,
+                         slice_times,
                          behav,
                          fs_dir=None, 
                          conds=None,
@@ -914,7 +919,15 @@ def analyze_bids_dataset(bold_files,
     else:
         registration = create_reg_workflow()
 
-    realign = Node(nipy.Space)
+    ''' realign functionals '''    
+    realign = MapNode(nipy.SpaceTimeRealigner(), iterfield=['in_file'],
+                      name='spacetime_realign')
+    realign.inputs.slice_times = slice_times
+    realign.inputs.tr = TR
+    realign.inputs.slice_info = 2
+    realign.inputs.in_file = files
+
+
     """
     Remove the plotting connection so that plot iterables don't propagate
     to the model stage
