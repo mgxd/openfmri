@@ -20,27 +20,20 @@ import six
 from glob import glob
 import os
 
-import nipype.pipeline.engine as pe
 import nipype.algorithms.modelgen as model
 import nipype.algorithms.rapidart as ra
-import nipype.interfaces.fsl as fsl
-import nipype.interfaces.ants as ants
 from nipype.algorithms.misc import TSNR
 from nipype.interfaces.c3 import C3dAffineTool
-import nipype.interfaces.io as nio
-import nipype.interfaces.utility as niu
-from nipype.workflows.fmri.fsl import (create_featreg_preproc,
-                                       create_modelfit_workflow,
+from nipype.workflows.fmri.fsl import (create_modelfit_workflow,
                                        create_fixed_effects_flow)
 
 from nipype import LooseVersion
 from nipype import Workflow, Node, MapNode
-from nipype.interfaces import (fsl, Function, ants, freesurfer)
+from nipype.interfaces import (fsl, Function, ants, freesurfer, nipy)
 
 from nipype.interfaces.utility import Rename, Merge, IdentityInterface
 from nipype.utils.filemanip import filename_to_list
 from nipype.interfaces.io import DataSink, FreeSurferSource
-import nipype.interfaces.freesurfer as fs
 
 version = 0
 if fsl.Info.version() and \
@@ -110,16 +103,16 @@ def create_reg_workflow(name='registration'):
     -------
     """
 
-    register = pe.Workflow(name=name)
+    register = Workflow(name=name)
 
-    inputnode = pe.Node(interface=niu.IdentityInterface(fields=['source_files',
+    inputnode = Node(interface=IdentityInterface(fields=['source_files',
                                                                  'mean_image',
                                                                  'anatomical_image',
                                                                  'target_image',
                                                                  'target_image_brain',
                                                                  'config_file']),
                         name='inputspec')
-    outputnode = pe.Node(interface=niu.IdentityInterface(fields=['func2anat_transform',
+    outputnode = Node(interface=IdentityInterface(fields=['func2anat_transform',
                                                                  'anat2target_transform',
                                                                  'transformed_files',
                                                                  'transformed_mean',
@@ -133,16 +126,16 @@ def create_reg_workflow(name='registration'):
     as FSL appears to be breaking.
     """
 
-    stripper = pe.Node(fsl.BET(), name='stripper')
+    stripper = Node(fsl.BET(), name='stripper')
     register.connect(inputnode, 'anatomical_image', stripper, 'in_file')
-    fast = pe.Node(fsl.FAST(), name='fast')
+    fast = Node(fsl.FAST(), name='fast')
     register.connect(stripper, 'out_file', fast, 'in_files')
 
     """
     Binarize the segmentation
     """
 
-    binarize = pe.Node(fsl.ImageMaths(op_string='-nan -thr 0.5 -bin'),
+    binarize = Node(fsl.ImageMaths(op_string='-nan -thr 0.5 -bin'),
                        name='binarize')
     pickindex = lambda x, i: x[i]
     register.connect(fast, ('partial_volume_files', pickindex, 2),
@@ -152,7 +145,7 @@ def create_reg_workflow(name='registration'):
     Calculate rigid transform from mean image to anatomical image
     """
 
-    mean2anat = pe.Node(fsl.FLIRT(), name='mean2anat')
+    mean2anat = Node(fsl.FLIRT(), name='mean2anat')
     mean2anat.inputs.dof = 6
     register.connect(inputnode, 'mean_image', mean2anat, 'in_file')
     register.connect(stripper, 'out_file', mean2anat, 'reference')
@@ -161,7 +154,7 @@ def create_reg_workflow(name='registration'):
     Now use bbr cost function to improve the transform
     """
 
-    mean2anatbbr = pe.Node(fsl.FLIRT(), name='mean2anatbbr')
+    mean2anatbbr = Node(fsl.FLIRT(), name='mean2anatbbr')
     mean2anatbbr.inputs.dof = 6
     mean2anatbbr.inputs.cost = 'bbr'
     mean2anatbbr.inputs.schedule = os.path.join(os.getenv('FSLDIR'),
@@ -183,7 +176,7 @@ def create_reg_workflow(name='registration'):
     Convert the BBRegister transformation to ANTS ITK format
     """
 
-    convert2itk = pe.Node(C3dAffineTool(),
+    convert2itk = Node(C3dAffineTool(),
                           name='convert2itk')
     convert2itk.inputs.fsl2ras = True
     convert2itk.inputs.itk_transform = True
@@ -200,7 +193,7 @@ def create_reg_workflow(name='registration'):
     #https://github.com/stnava/ANTs/blob/master/Scripts/newAntsExample.sh
     """
 
-    reg = pe.Node(ants.Registration(), name='antsRegister')
+    reg = Node(ants.Registration(), name='antsRegister')
     reg.inputs.output_transform_prefix = "output_"
     reg.inputs.transforms = ['Rigid', 'Affine', 'SyN']
     reg.inputs.transform_parameters = [(0.1,), (0.1,), (0.2, 3.0, 0.0)]
@@ -238,7 +231,7 @@ def create_reg_workflow(name='registration'):
 
     pickfirst = lambda x: x[0]
 
-    merge = pe.Node(niu.Merge(2), iterfield=['in2'], name='mergexfm')
+    merge = Node(Merge(2), iterfield=['in2'], name='mergexfm')
     register.connect(convert2itk, 'itk_transform', merge, 'in2')
     register.connect(reg, 'composite_transform', merge, 'in1')
 
@@ -247,7 +240,7 @@ def create_reg_workflow(name='registration'):
     Transform the mean image. First to anatomical and then to target
     """
 
-    warpmean = pe.Node(ants.ApplyTransforms(),
+    warpmean = Node(ants.ApplyTransforms(),
                        name='warpmean')
     warpmean.inputs.input_image_type = 0
     warpmean.inputs.interpolation = 'Linear'
@@ -262,7 +255,7 @@ def create_reg_workflow(name='registration'):
     Transform the remaining images. First to anatomical and then to target
     """
 
-    warpall = pe.MapNode(ants.ApplyTransforms(),
+    warpall = MapNode(ants.ApplyTransforms(),
                          iterfield=['input_image'],
                          name='warpall')
     warpall.inputs.input_image_type = 0
@@ -476,7 +469,7 @@ def create_fs_reg_workflow(name='registration'):
     Transform the remaining images. First to anatomical and then to target
     """
 
-    warpall = pe.MapNode(ants.ApplyTransforms(),
+    warpall = MapNode(ants.ApplyTransforms(),
                          iterfield=['input_image'],
                          name='warpall')
     warpall.inputs.input_image_type = 0
@@ -913,7 +906,7 @@ def analyze_bids_dataset(bold_files,
     Load nipype workflows
     """
 
-    preproc = create_featreg_preproc(whichvol='first')
+    #preproc = create_parallelfeat_preproc() #whichvol = 'first'
     modelfit = create_modelfit_workflow()
     fixed_fx = create_fixed_effects_flow()
     if fs_dir:
@@ -921,18 +914,20 @@ def analyze_bids_dataset(bold_files,
     else:
         registration = create_reg_workflow()
 
+    realign = Node(nipy.Space)
     """
     Remove the plotting connection so that plot iterables don't propagate
     to the model stage
     """
 
-    preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
-                       preproc.get_node('outputspec'), 'motion_plots')
-    preproc.inputspec.func = bold_files
+    #preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
+    #                   preproc.get_node('outputspec'), 'motion_plots')
+    #preproc.inputspec.func = bold_files
     
     def get_highpass(TR, hpcutoff):
         return hpcutoff / (2 * TR)
-    gethighpass = pe.Node(niu.Function(input_names=['TR', 'hpcutoff'],
+
+    gethighpass = Node(Function(input_names=['TR', 'hpcutoff'],
                                        output_names=['highpass'],
                                        function=get_highpass),
                           name='gethighpass')
@@ -941,7 +936,7 @@ def analyze_bids_dataset(bold_files,
     
     # make the workflow
     wf = Workflow(name=name)
-    wf.connect(gethighpass, 'highpass', preproc, 'inputspec.highpass')
+    #wf.connect(gethighpass, 'highpass', preproc, 'inputspec.highpass')
 
     """
     Setup a basic set of contrasts, a t-test per condition
@@ -967,7 +962,7 @@ def analyze_bids_dataset(bold_files,
             contrasts.append(con)
         return contrasts
 
-    contrastgen = pe.Node(niu.Function(input_names=['contrast_file',
+    contrastgen = Node(Function(input_names=['contrast_file',
                                                     'task_id', 'conds'],
                                        output_names=['contrasts'],
                                        function=get_contrasts),
@@ -977,7 +972,7 @@ def analyze_bids_dataset(bold_files,
     contrastgen.inputs.task_id = task_id
     contrastgen.inputs.conds = conds
 
-    art = pe.MapNode(interface=ra.ArtifactDetect(use_differences=[True, False],
+    art = MapNode(interface=ra.ArtifactDetect(use_differences=[True, False],
                                                  use_norm=True,
                                                  norm_threshold=1,
                                                  zintensity_threshold=3,
@@ -987,7 +982,7 @@ def analyze_bids_dataset(bold_files,
                                 'mask_file'],
                      name="art")
 
-    modelspec = pe.Node(interface=model.SpecifyModel(),
+    modelspec = Node(interface=model.SpecifyModel(),
                            name="modelspec")
     modelspec.inputs.input_units = 'secs'
     modelspec.inputs.time_reptition = TR
@@ -1002,7 +997,7 @@ def analyze_bids_dataset(bold_files,
         num_elements = behav_array.shape[0]
         return behav_array.reshape(num_elements/num_conds, num_conds).tolist()
 
-    reshape_behav = pe.Node(niu.Function(input_names=['behav', 'run_id', 'conds'],
+    reshape_behav = Node(Function(input_names=['behav', 'run_id', 'conds'],
                                        output_names=['behav'],
                                        function=check_behav_list),
                           name='reshape_behav')
@@ -1016,20 +1011,20 @@ def analyze_bids_dataset(bold_files,
 
     wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
 
-    wf.connect([(preproc, art, [('outputspec.motion_parameters',
-                                 'realignment_parameters'),
-                                ('outputspec.realigned_files',
-                                 'realigned_files'),
-                                ('outputspec.mask', 'mask_file')]),
-                (preproc, modelspec, [('outputspec.highpassed_files',
-                                       'functional_runs'),
-                                      ('outputspec.motion_parameters',
-                                       'realignment_parameters')]),
+    #wf.connect([(preproc, art, [('outputspec.motion_parameters',
+    #                             'realignment_parameters'),
+    #                            ('outputspec.realigned_files',
+    #                             'realigned_files'),
+    #                            ('outputspec.mask', 'mask_file')]),
+    #            (preproc, modelspec, [('outputspec.highpassed_files',
+    #                                   'functional_runs'),
+    #                                  ('outputspec.motion_parameters',
+    #                                   'realignment_parameters')]),
                 (art, modelspec, [('outlier_files', 'outlier_files')]),
                 (modelspec, modelfit, [('session_info',
                                         'inputspec.session_info')]),
-                (preproc, modelfit, [('outputspec.highpassed_files',
-                                      'inputspec.functional_data')])
+     #           (preproc, modelfit, [('outputspec.highpassed_files',
+     #                                 'inputspec.functional_data')])
                 ])
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
@@ -1037,12 +1032,13 @@ def analyze_bids_dataset(bold_files,
     tsnr.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=16G -c 4'}
 
-    # Compute the median image across runs
-    calc_median = Node(Function(input_names=['in_files'],
-                                output_names=['median_file'],
-                                function=median,
-                                imports=imports),
-                       name='median')
+    # Compute the median image across runs (now MapNode)
+    calc_median = MapNode(Function(input_names=['in_files'],
+                                   output_names=['median_file'],
+                                   function=median,
+                                   imports=imports),
+                          iterfield=['in_files'],
+                          name='median')
     # regardless of topup
     recalc_median = calc_median.clone(name='recalc_median')
 
@@ -1077,7 +1073,7 @@ def analyze_bids_dataset(bold_files,
         outvarcopes = all_varcopes.reshape(len(all_varcopes)/num_copes, num_copes).T.tolist()
         return outcopes, outvarcopes, n_runs
 
-    cope_sorter = pe.Node(niu.Function(input_names=['copes', 'varcopes',
+    cope_sorter = Node(Function(input_names=['copes', 'varcopes',
                                                     'contrasts'],
                                        output_names=['copes', 'varcopes',
                                                      'n_runs'],
@@ -1123,7 +1119,7 @@ def analyze_bids_dataset(bold_files,
         splits.append(len(zstats))
         return out_files, splits
 
-    mergefunc = pe.Node(niu.Function(input_names=['copes', 'varcopes',
+    mergefunc = Node(Function(input_names=['copes', 'varcopes',
                                                   'zstats'],
                                    output_names=['out_files', 'splits'],
                                    function=merge_files),
@@ -1141,7 +1137,7 @@ def analyze_bids_dataset(bold_files,
         zstats = in_files[(splits[0] + splits[1]):]
         return copes, varcopes, zstats
 
-    splitfunc = pe.Node(niu.Function(input_names=['in_files', 'splits'],
+    splitfunc = Node(Function(input_names=['in_files', 'splits'],
                                      output_names=['copes', 'varcopes',
                                                    'zstats'],
                                      function=split_files),
@@ -1151,13 +1147,13 @@ def analyze_bids_dataset(bold_files,
                splitfunc, 'in_files')
 
     if fs_dir:
-        get_roi_mean = pe.MapNode(fs.SegStats(default_color_table=True),
+        get_roi_mean = MapNode(fs.SegStats(default_color_table=True),
                                   iterfield=['in_file'], name='get_aparc_means')
         get_roi_mean.inputs.avgwf_txt_file = True
         wf.connect(fixed_fx.get_node('outputspec'), 'copes', get_roi_mean, 'in_file')
         wf.connect(registration, 'outputspec.aparc', get_roi_mean, 'segmentation_file')
 
-        get_roi_tsnr = pe.MapNode(fs.SegStats(default_color_table=True),
+        get_roi_tsnr = MapNode(fs.SegStats(default_color_table=True),
                                   iterfield=['in_file'], name='get_aparc_tsnr')
         get_roi_tsnr.inputs.avgwf_txt_file = True
         wf.connect(tsnr, 'tsnr_file', get_roi_tsnr, 'in_file')
@@ -1224,14 +1220,14 @@ def analyze_bids_dataset(bold_files,
         subs.append(('median_bbreg_brain_mask', 'median_brain_mask'))
         return subs
 
-    subsgen = pe.Node(niu.Function(input_names=['subject_id', 'conds', 'run_id',
+    subsgen = Node(Function(input_names=['subject_id', 'conds', 'run_id',
                                                 'model_id', 'task_id'],
                                    output_names=['substitutions'],
                                    function=get_subs),
                       name='subsgen')
     wf.connect(subjinfo, 'run_id', subsgen, 'run_id')
 
-    datasink = pe.Node(interface=nio.DataSink(),
+    datasink = Node(interface=DataSink(),
                        name="datasink")
     wf.connect(infosource, 'subject_id', datasink, 'container')
     wf.connect(infosource, 'subject_id', subsgen, 'subject_id')
