@@ -516,6 +516,18 @@ def create_fs_reg_workflow(name='registration'):
 
     return register
 
+""" Write topup encoding file """
+def write_encoding_file(readout, fname, pe):
+    import os
+    if pe == 'j':
+        direction = 1
+    elif pe == 'j-':
+        direction = -1
+    filename = os.path.join(os.getcwd(), 'acq_param_%s.txt' % fname)
+    with open(filename, 'w') as f:  
+        f.writelines(['0 %d 0 %s\n' % (direction, readout),    
+                      '0 %d 0 %s\n' % (direction * -1, readout)])
+    return filename
 
 def create_topup_workflow(num_slices, pe_key, readout, 
                           readout_topup, name='topup'):
@@ -524,10 +536,11 @@ def create_topup_workflow(num_slices, pe_key, readout,
     ----------
     name : name of workflow (default: 'topup')
     Inputs::
-        inputspec.realigned_files : realigned resting state time series files
+        inputspec.realigned_files : realigned bold time series files
         inputspec.ref_file : reference image to register TOPUP images to realigned files
         inputspec.topup_AP : merged TOPUP images in AP phase-encoding direction
         inputspec.topup_PA : merged TOPUP images in PA phase-encoding direction
+        inputspec.phase_encoding : PE direction of run
     Outputs::
         outputspec.topup_encoding_file : acquisition parameter text file for TOPUP files
         outputspec.rest_encoding_file : acquisition parameter text file for rest file
@@ -555,21 +568,14 @@ def create_topup_workflow(num_slices, pe_key, readout,
                                                           ]),
                       name='outputspec')
 
-    pe_dirs = {'j-':-1, 'j':1} #AP:-1 PA:1
-
-    opp_key = {}
-    for run in pe_key:
-        opp_pe = [x for x in key.keys() if x != totest[run]][0]
-        opp_key[run] = opp_pe
-
-    topup2median = MapNode(fsl.FLIRT(out_file='%s2median.nii.gz' % rest_pe_dir, 
+    topup2median = MapNode(fsl.FLIRT(out_file='orig2median.nii.gz', 
                                   output_type='NIFTI_GZ', interp='spline'), 
-                        name='%s2median' % rest_pe_dir)
+                        name='orig2median')
     topup2median.inputs.dof = 6
-    topup2median.inputs.out_matrix_file = '%s2median' % rest_pe_dir
+    topup2median.inputs.out_matrix_file = 'orig2median'
 
-    applyxfm = Node(fsl.ApplyXfm(out_file='%s2median.nii.gz' % opp_pe_dir, 
-                                 apply_xfm=True, interp='spline', output_type='NIFTI_GZ'),
+    applyxfm = Node(fsl.ApplyXfm(out_file='opp2median.nii.gz', apply_xfm=True, 
+                                 interp='spline', output_type='NIFTI_GZ'),
                     name='applyxfm')        
     topup.connect(topup2median, 'out_matrix_file', applyxfm, 'in_matrix_file')
 
@@ -582,13 +588,13 @@ def create_topup_workflow(num_slices, pe_key, readout,
     topup.connect(make_topup_list, 'out', merge_topup, 'in_files')
 
     file_writer_topup = Node(Function(input_names=['readout', 'fname',
-                                                   'direction'],
+                                                   'pe'],
                                 output_names=['encoding_file'],
                                 function=write_encoding_file),
                        name='file_writer_topup')
     file_writer_topup.inputs.readout = readout_topup
     file_writer_topup.inputs.fname = 'topup'
-    file_writer_topup.inputs.direction = pe_dirs[rest_pe_dir]
+    topup.connect(inputnode, 'phase_encoding', file_writer_topup, 'pe')
 
     run_topup = Node(fsl.TOPUP(out_corrected='b0correct.nii.gz', numprec='float', 
                         config='b02b0.cnf', output_type='NIFTI_GZ'), 
@@ -601,7 +607,8 @@ def create_topup_workflow(num_slices, pe_key, readout,
 
     file_writer_ts = file_writer_topup.clone(name='file_writer_ts')
     file_writer_ts.inputs.readout = readout
-    file_writer_ts.inputs.fname = 'rest_ts'
+    file_writer_ts.inputs.fname = 'rest_ts'-
+    topup.connect(inputnode, 'phase_encoding', file_writer_ts, 'pe')
 
     topup.connect(merge_topup, 'merged_file', run_topup, 'in_file')
     topup.connect(file_writer_ts, 'encoding_file', applytopup, 'encoding_file')
@@ -616,9 +623,9 @@ def create_topup_workflow(num_slices, pe_key, readout,
         rm_slice_ref = Node(fsl.ExtractROI(), name='rm_slice_ref') 
         rm_slice_ref.inputs.crop_list = [(0,-1),(0,-1),(0, num_slices-1),(0,1)]
 
-        extract_main = rm_slice_ref.clone(name='extract_%s' % rest_pe_dir) 
+        extract_main = rm_slice_ref.clone(name='extract_main') 
 
-        extract_opp = extract_main.clone(name='extract_%s' % opp_pe_dir)  
+        extract_opp = extract_main.clone(name='extract_%s')  
 
         topup.connect([(inputnode, rm_slice_ts, [('realigned_files', 'in_file')]),
                      (rm_slice_ts, applytopup, [('roi_file', 'in_files')]),
@@ -632,10 +639,10 @@ def create_topup_workflow(num_slices, pe_key, readout,
                      (inputnode, topup2median, [('ref_file', 'reference')]),
                      (inputnode, applyxfm, [('ref_file', 'reference')])])
 
-        extract_main = Node(fsl.ExtractROI(), name='extract_%s' % rest_pe_dir) 
+        extract_main = Node(fsl.ExtractROI(), name='extract_main') 
         extract_main.inputs.crop_list = [(0,-1), (0,-1), (0,-1), (0,1)]
 
-        extract_opp = extract_main.clone(name='extract_%s' % opp_pe_dir)
+        extract_opp = extract_main.clone(name='extract_opp')
 
     if rest_pe_dir == 'AP':
         topup.connect(inputnode, 'topup_AP', extract_main, 'in_file')
@@ -765,9 +772,7 @@ def get_topup_info(layout, bold_files):
     num_slices, readout = orig_info['dcmmeta_shape'][3], \
     (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
     # keep track of directions
-    pe_key = {}
-    for i,bold in enumerate(bold_files,1):
-        pe_key[i] = layout.get_metadata(bold)['PhaseEncodingDirection']
+    pe_key = [layout.get_metadata(bold)['PhaseEncodingDirection'] for bold in bold_files]
         
     return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
 
@@ -790,7 +795,6 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
-    # is this even needed? yes
     old_model_dir = os.path.join(os.path.join(data_dir, 'code', 'model', 
                                               'model{:03d}'.format(args.model)))
 
@@ -800,12 +804,13 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     meta_wf = Workflow('meta_level')
 
     for subj_label in subjs_to_analyze: #replacing infosource
-        subj_link = os.path.join(new_subj_dir, subj_label)
-        orig_dir = os.path.join(fs_dir, subj_label)
-        if not os.path.exists(orig_dir):
-            continue
-        if not os.path.islink(subj_link):
-            os.symlink(orig_dir, subj_link)
+        # is this even needed?
+        #subj_link = os.path.join(new_subj_dir, subj_label)
+        #orig_dir = os.path.join(fs_dir, subj_label) # fix for sessions
+        #if not os.path.exists(orig_dir):
+        #    continue
+        #if not os.path.islink(subj_link):
+        #    os.symlink(orig_dir, subj_link)
         from bids.grabbids import BIDSLayout
         layout = BIDSLayout(bids_dir)
         
@@ -817,9 +822,9 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                                                          'task-{}'.format(task_id), 
                                                          model_id, session_id)
         # replacing datasource
-        bold_files = [f.filename for f in \
+        bold_files = sorted([f.filename for f in \
                       layout.get(subject = subj_label.replace('sub-',''),
-                      type='bold', task=task_id, extensions=['nii.gz', 'nii'])]
+                      type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
 
         anat = [f.filename for f in \
                 layout.get(subject = subj_label.replace('sub-',''),
@@ -827,7 +832,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
         #use events.tsv eventually
         behav = [x for x in glob(
-            os.path.join(old_model_dir, 'onsets', subj_label,
+                 os.path.join(old_model_dir, 'onsets', subj_label,
                          'task-{}*'.format(task_id), 'cond*.txt'))
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
@@ -911,32 +916,18 @@ def analyze_bids_dataset(bold_files,
     Load nipype workflows
     """
 
-    #preproc = create_parallelfeat_preproc() #whichvol = 'first'
+    wf = Workflow(name=name)
+
+    """ imported workflows """
     modelfit = create_modelfit_workflow()
     fixed_fx = create_fixed_effects_flow()
+    ## replace reg with resting state one
     if fs_dir:
         registration = create_fs_reg_workflow()
     else:
         registration = create_reg_workflow()
 
-    ''' realign functionals '''    
-    realign = MapNode(nipy.SpaceTimeRealigner(), iterfield=['in_file'],
-                      name='spacetime_realign')
-    realign.inputs.slice_times = slice_times
-    realign.inputs.tr = TR
-    realign.inputs.slice_info = 2
-    realign.inputs.in_file = files
-
-
-    """
-    Remove the plotting connection so that plot iterables don't propagate
-    to the model stage
-    """
-
-    #preproc.disconnect(preproc.get_node('plot_motion'), 'out_file',
-    #                   preproc.get_node('outputspec'), 'motion_plots')
-    #preproc.inputspec.func = bold_files
-    
+    """ calculate highpass """
     def get_highpass(TR, hpcutoff):
         return hpcutoff / (2 * TR)
 
@@ -947,10 +938,6 @@ def analyze_bids_dataset(bold_files,
     gethighpass.inputs.TR = TR
     gethighpass.inputs.hpcutoff = hpcutoff
     
-    # make the workflow
-    wf = Workflow(name=name)
-    #wf.connect(gethighpass, 'highpass', preproc, 'inputspec.highpass')
-
     """
     Setup a basic set of contrasts, a t-test per condition
     """
@@ -985,6 +972,9 @@ def analyze_bids_dataset(bold_files,
     contrastgen.inputs.task_id = task_id
     contrastgen.inputs.conds = conds
 
+    """
+    ArtifactDetect - post-processed data
+    """
     art = MapNode(interface=ra.ArtifactDetect(use_differences=[True, False],
                                                  use_norm=True,
                                                  norm_threshold=1,
@@ -1019,11 +1009,10 @@ def analyze_bids_dataset(bold_files,
     reshape_behav.inputs.conds = conds
 
     wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
-
     modelfit.inputspec.interscan_interval = TR
-
     wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
 
+    """TODO: connect to art, modelspec, modelfit"""
     #wf.connect([(preproc, art, [('outputspec.motion_parameters',
     #                             'realignment_parameters'),
     #                            ('outputspec.realigned_files',
@@ -1040,29 +1029,77 @@ def analyze_bids_dataset(bold_files,
      #                                 'inputspec.functional_data')])
                 ])
 
+    """ iter through runs, set phase encoding direction for topup """
+    """ WILL NEED TO JOIN AFTER TOPUP """
+    def iter_runs(bold, pe=None):
+        return bold, pe
+    
+    infosource = Node(Function(input_names=['bold','pe'],
+                               output_names=['out_bold','out_pe'],
+                               function=iter_runs),
+                 name='iter_runs')
+    if topup_AP:
+        infosource.iterables = [('bold', bold_files), ('pe', pe_key)]
+        infosource.synchronize = True
+    else:
+        infosource.iterables = ('bold', bold_files)
+
+    """
+    realign functionals
+
+    Outputs:
+
+    out_file: (a list of items which are an existing file name)
+        Realigned files (per run)
+    par_file: (a list of items which are an existing file name)
+        Motion parameter files. Angles are not euler angles
+    """
+    realign = Node(nipy.SpaceTimeRealigner(), name='spacetime_realign')
+
+    realign.inputs.slice_times = slice_times
+    realign.inputs.tr = TR
+    realign.inputs.slice_info = 2
+    realign.plugin_args = {'sbatch_args': '-c 4'}
+
+    wf.connect(infosource, 'out_bold', realign, 'in_file')
+
     # Comute TSNR on realigned data regressing polynomials upto order 2
-    tsnr = MapNode(TSNR(regress_poly=2), iterfield=['in_file'], name='tsnr')
+    tsnr = Node(TSNR(regress_poly=2), name='tsnr')
     tsnr.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=16G -c 4'}
 
     # Compute the median image across runs (now MapNode)
-    calc_median = MapNode(Function(input_names=['in_files'],
-                                   output_names=['median_file'],
-                                   function=median,
-                                   imports=imports),
-                          iterfield=['in_files'],
+    calc_median = Node(Function(input_names=['in_files'],
+                                output_names=['median_file'],
+                                function=median,
+                                imports=imports),
                           name='median')
+    
     # regardless of topup
     recalc_median = calc_median.clone(name='recalc_median')
 
     if topup_AP:
-        topup = create_topup_workflow(num_slices, pe_key, readout, 
+        topup = create_topup_workflow(num_slices, readout, 
                                       readout_topup, name='topup')
         topup.inputs.inputspec.topup_AP = topup_AP
         topup.inputs.inputspec.topup_PA = topup_PA
-        wf.connect(preproc, 'outputspec.realigned_files', topup, 'inputspec.realigned_files')
-        wf.connect(preproc, 'outputspec.realigned_files', calc_median, 'in_files')
+        wf.connect(infosource, 'out_pe', topup, 'inputspec.phase_encoding')
+        wf.connect(realign, 'out_file', topup, 'inputspec.realigned_files')
+        wf.connect(realign, 'out_file', calc_median, 'in_files')
         wf.connect(calc_median, 'median_file', topup, 'inputspec.ref_file')
+
+        """ join and realign corrected images """
+        realign_topup = JoinNode(nipy.SpaceTimeRealigner(),
+                        joinsource='iter_runs',
+                        joinfield='in_files',
+                        name='realign_topup')
+        realign_topup.inputs.slice_times = slice_times
+        realign_topup.inputs.tr = TR
+        realign_topup.inputs.slice_info = 2
+        realign_topup.plugin_args = {'sbatch_args': '-c 4'}
+
+        wf.connect(topup, 'outputspec.applytopup_corrected', realign_topup, 'in_file')
+
         wf.connect(topup, 'outputspec.applytopup_corrected', tsnr, 'in_file')
         wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
     else:
