@@ -990,18 +990,18 @@ def analyze_bids_dataset(bold_files,
     recalc_median = calc_median.clone(name='recalc_median')
 
     if topup_AP:
-        wf.connect(infosource, 'bold', realign_run, 'in_file')
         topup = create_topup_workflow(num_slices, readout, 
                                       readout_topup, name='topup')
         topup.inputs.inputspec.topup_AP = topup_AP
         topup.inputs.inputspec.topup_PA = topup_PA
+        wf.connect(infosource, 'bold', realign_run, 'in_file')
         wf.connect(infosource, 'pe', topup, 'inputspec.phase_encoding')
         wf.connect(realign_run, 'out_file', topup, 'inputspec.realigned_files')
         wf.connect(realign_run, 'out_file', calc_median, 'in_files')
         wf.connect(calc_median, 'median_file', topup, 'inputspec.ref_file')
 
-        # join to include topup correction, mov pars (MAPNODE ITERFIELD LIST TO USE TOGETHER)
         def topup_combiner(topup_corrected_bold, realign_movpar, topup_movpar):
+            """ joiner after topup correction """
             return topup_corrected_bold, realign_movpar, topup_movpar
 
         joiner = JoinNode(Function(input_names=['topup_corrected_bold',
@@ -1016,28 +1016,31 @@ def analyze_bids_dataset(bold_files,
                                      'realign_movpar',
                                      'topup_movpar'],
                           name='topup_joiner')
-        # basically a datasink for each run (use mapnode's iterfield to assign both)
+        # basically a datasink for each run (use mapnode - iterfield to assign both)
         wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'topup_corrected_bold')
         wf.connect(realign_run, 'par_file', joiner, 'realign_movpar')
         wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpar')
     else:
-        def run_combiner(bold_file):
-            return bold_file
+        def run_combiner(bold_file, realign_movpar):
+            """ joiner for non-topup """
+            return bold_file, realign_movpar
 
         joiner = JoinNode(Function(input_names=['bold_file'],
-                                   output_names=['corrected_bolds'],
+                                   output_names=['corrected_bolds',
+                                                 'nipy_realign_pars'],
                                    function=run_combiner),
                           joinsource='infosource',
                           joinfield=['bold_file'],
                           name='run_joiner')
         wf.connect(infosource, 'bold', joiner, 'bold_file'])
 
-            """ realign across runs """
+    #realign across runs
     realign_all = realign_run.clone(name='realign_allruns')
 
     wf.connect(joiner, 'corrected_bolds', realign_all, 'in_file')
     wf.connect(realign_all, 'out_file', tsnr, 'in_file')
     wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
+
     # segment and register
     if fs_dir:
         registration = create_fs_reg_workflow()
@@ -1063,11 +1066,15 @@ def analyze_bids_dataset(bold_files,
     wf.connect(tsnr, 'tsnr_file', get_roi_tsnr, 'in_file')
     wf.connect(registration, 'outputspec.aparc', get_roi_tsnr, 'segmentation_file')
 
+    # Get a brain mask
+    mask = Node(fsl.BET(), name='mask-bet')
+    mask.inputs.mask = True
+    wf.connect(recalc_median, 'median_file', mask, 'in_file')
+
     """ Detect outliers in a functional imaging series"""
     art = MapNode(ra.ArtifactDetect(),
                   iterfield=['realigned_files', 
-                             'realignment_parameters',
-                             'mask_file'],
+                             'realignment_parameters'],
                   name="art")
     art.inputs.use_differences = [True, False]
     art.inputs.use_norm = True
@@ -1075,8 +1082,9 @@ def analyze_bids_dataset(bold_files,
     art.inputs.zintensity_threshold = 3
     art.inputs.mask_type = 'spm_global'
     art.inputs.parameter_source = 'NiPy'
-    # art wf input connections
-    # realign params per run? How to get them...
+    wf.connect([(realign_all, art, [('out_file', 'realigned_files')]),
+                (joiner, art, [('nipy_realign_pars', 'realignment_parameters')])
+               ])
 
     def selectindex(files, idx):
     """ Utility function for registration seg files """
@@ -1390,7 +1398,3 @@ if __name__ == '__main__':
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
         wf.run(args.plugin)
-
-
-
-
