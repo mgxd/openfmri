@@ -20,20 +20,18 @@ import six
 from glob import glob
 import os
 
+from nipype import LooseVersion
+from nipype import Workflow, Node, MapNode
+from nipype.interfaces import (fsl, Function, ants, freesurfer, nipy)
+from nipype.interfaces.utility import Rename, Merge, IdentityInterface
+from nipype.utils.filemanip import filename_to_list, list_to_filename
+from nipype.interfaces.io import DataSink, FreeSurferSource
 import nipype.algorithms.modelgen as model
 import nipype.algorithms.rapidart as ra
 from nipype.algorithms.misc import TSNR
 from nipype.interfaces.c3 import C3dAffineTool
 from nipype.workflows.fmri.fsl import (create_modelfit_workflow,
                                        create_fixed_effects_flow)
-
-from nipype import LooseVersion
-from nipype import Workflow, Node, MapNode
-from nipype.interfaces import (fsl, Function, ants, freesurfer, nipy)
-
-from nipype.interfaces.utility import Rename, Merge, IdentityInterface
-from nipype.utils.filemanip import filename_to_list
-from nipype.interfaces.io import DataSink, FreeSurferSource
 
 version = 0
 if fsl.Info.version() and \
@@ -496,12 +494,12 @@ def create_fs_reg_workflow(name='registration'):
     return register
 
 
-def write_encoding_file(readout, fname, pe):
+def write_encoding_file(readout, fname, pe=None):
     """ Write topup encoding file """
     import os
     if pe == 'j':
         direction = 1
-    elif pe == 'j-':
+    elif (pe == 'j-') or not pe:
         direction = -1
     filename = os.path.join(os.getcwd(), 'acq_param_%s.txt' % fname)
     with open(filename, 'w') as f:  
@@ -654,7 +652,6 @@ def create_topup_workflow(num_slices, pe_key, readout,
     topup.connect(applytopup, 'out_corrected', outputnode, 'applytopup_corrected')
 
     return topup
-
 
 def get_subjectinfo(subject_id, base_dir, task, model_id, session_id=None):
     """Get info for a given subject
@@ -875,16 +872,15 @@ def analyze_bids_dataset(bold_files,
                          readout_topup=None, 
                          outdir=None, 
                          name=name):
-
+    
+    # Initialize subject workflow and import others
     wf = Workflow(name=name)
-
-    """ import workflows """
     modelfit = create_modelfit_workflow()
     modelfit.inputspec.interscan_interval = TR
     fixed_fx = create_fixed_effects_flow()
 
     def get_highpass(TR, hpcutoff):
-    """ calculate highpass """
+    """ Calculate highpass """
         return hpcutoff / (2 * TR)
 
     gethighpass = Node(Function(input_names=['TR', 'hpcutoff'],
@@ -895,9 +891,7 @@ def analyze_bids_dataset(bold_files,
     gethighpass.inputs.hpcutoff = hpcutoff
 
     def get_contrasts(contrast_file, task_id, conds):
-    """
-    Setup a basic set of contrasts, a t-test per condition
-    """
+    """ Setup a basic set of contrasts, a t-test per condition """
         import numpy as np
         import os
         contrast_def = []
@@ -928,21 +922,8 @@ def analyze_bids_dataset(bold_files,
     contrastgen.inputs.conds = conds
     wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
 
-    """
-    ArtifactDetect - post-processed data
-    """
-    art = MapNode(ra.ArtifactDetect(use_differences=[True, False],
-                                    use_norm=True,
-                                    norm_threshold=1,
-                                    zintensity_threshold=3,
-                                    parameter_source='FSL',
-                                    mask_type='file'),
-                  iterfield=['realigned_files', 'realignment_parameters',
-                             'mask_file'],
-                  name="art")
-
-    """ Check and reshape cond00x.txt files """
     def check_behav_list(behav, run_id, conds):
+        """ Check and reshape cond00x.txt files """
         import six
         import numpy as np
         num_conds = len(conds)
@@ -964,43 +945,22 @@ def analyze_bids_dataset(bold_files,
                      name="modelspec")
     modelspec.inputs.input_units = 'secs'
     modelspec.inputs.time_reptition = TR
-
     wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
 
-    """TODO: connect to art, modelspec, modelfit"""
-    #wf.connect([(preproc, art, [('outputspec.motion_parameters',
-    #                             'realignment_parameters'),
-    #                            ('outputspec.realigned_files',
-    #                             'realigned_files'),
-    #                            ('outputspec.mask', 'mask_file')]),
-    #            (preproc, modelspec, [('outputspec.highpassed_files',
-    #                                   'functional_runs'),
-    #                                  ('outputspec.motion_parameters',
-    #                                   'realignment_parameters')]),
-                (art, modelspec, [('outlier_files', 'outlier_files')]),
-                (modelspec, modelfit, [('session_info',
-                                        'inputspec.session_info')]),
-     #           (preproc, modelfit, [('outputspec.highpassed_files',
-     #                                 'inputspec.functional_data')])
-                ])
 
-    """ iter through runs, set phase encoding direction for topup """
-    """ WILL NEED TO JOIN AFTER TOPUP """
-    def iter_runs(bold, pe=None):
-        return bold, pe
-    
-    infosource = Node(Function(input_names=['bold','pe'],
-                               output_names=['out_bold','out_pe'],
-                               function=iter_runs),
-                 name='iter_runs')
-    if topup_AP:
+    # Start of bold analysis
+    if pe_key:
+        infosource = Node(IdentityInterface(fields=['bold', 'pe']),
+                      name='infosource')
         infosource.iterables = [('bold', bold_files), ('pe', pe_key)]
         infosource.synchronize = True
     else:
+        infosource = Node(IdentityInterface(fields=['bold']),
+                      name='infosource')
         infosource.iterables = ('bold', bold_files)
 
     """
-    realign functionals
+    realign each functional run
 
     Outputs:
 
@@ -1009,12 +969,11 @@ def analyze_bids_dataset(bold_files,
     par_file: (a list of items which are an existing file name)
         Motion parameter files. Angles are not euler angles
     """
-    realign_run = Node(nipy.SpaceTimeRealigner(), name='realign_per_run')
-    realign_run.inputs.slice_times = slice_times
-    realign_run.inputs.tr = TR
-    realign_run.inputs.slice_info = 2
+    realign_run = Node(nipy.SpaceTimeRealigner(slice_times=slice_times,
+                                               tr=TR,
+                                               slice_info=2), 
+                       name='realign_per_run')
     realign_run.plugin_args = {'sbatch_args': '-c 4'}
-
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
     tsnr = Node(TSNR(regress_poly=2), name='tsnr')
@@ -1024,56 +983,110 @@ def analyze_bids_dataset(bold_files,
     # Compute the median image across runs (now MapNode)
     calc_median = Node(Function(input_names=['in_files'],
                                 output_names=['median_file'],
-                                function=median,
-                                imports=imports),
+                                function=median, imports=imports),
                           name='median')
     
-    # regardless of topup
+    # regardless of topup makes workflow easier to connect
     recalc_median = calc_median.clone(name='recalc_median')
 
-
-        """ join and realign corrected images """
-    realign_all = JoinNode(nipy.SpaceTimeRealigner(),
-                            joinsource='iter_runs',
-                            joinfield='in_files',
-                            name='realign_allruns')
-    realign_all.inputs.slice_times = slice_times
-    realign_all.inputs.tr = TR
-    realign_all.inputs.slice_info = 2
-    realign_all.plugin_args = {'sbatch_args': '-c 4'}
-
     if topup_AP:
-        wf.connect(infosource, 'out_bold', realign_run, 'in_file')
+        wf.connect(infosource, 'bold', realign_run, 'in_file')
         topup = create_topup_workflow(num_slices, readout, 
                                       readout_topup, name='topup')
         topup.inputs.inputspec.topup_AP = topup_AP
         topup.inputs.inputspec.topup_PA = topup_PA
-        wf.connect(infosource, 'out_pe', topup, 'inputspec.phase_encoding')
+        wf.connect(infosource, 'pe', topup, 'inputspec.phase_encoding')
         wf.connect(realign_run, 'out_file', topup, 'inputspec.realigned_files')
         wf.connect(realign_run, 'out_file', calc_median, 'in_files')
         wf.connect(calc_median, 'median_file', topup, 'inputspec.ref_file')
-        wf.connect(topup, 'outputspec.applytopup_corrected', realign_all, 'in_file')
-    else:
-        wf.connect(infosource, 'out_bold', realign_all, 'in_file')
 
+        # join to include topup correction, mov pars (MAPNODE ITERFIELD LIST TO USE TOGETHER)
+        def topup_combiner(topup_corrected_bold, realign_movpar, topup_movpar):
+            return topup_corrected_bold, realign_movpar, topup_movpar
+
+        joiner = JoinNode(Function(input_names=['topup_corrected_bold',
+                                                'realign_movpar',
+                                                'topup_movpar'],
+                                   output_names=['corrected_bolds',
+                                                 'nipy_realign_pars',
+                                                 'topup_movpars'],
+                                   function=topup_combiner),
+                          joinsource='infosource',
+                          joinfield=['topup_corrected_bold',
+                                     'realign_movpar',
+                                     'topup_movpar'],
+                          name='topup_joiner')
+        # basically a datasink for each run (use mapnode's iterfield to assign both)
+        wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'topup_corrected_bold')
+        wf.connect(realign_run, 'par_file', joiner, 'realign_movpar')
+        wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpar')
+    else:
+        def run_combiner(bold_file):
+            return bold_file
+
+        joiner = JoinNode(Function(input_names=['bold_file'],
+                                   output_names=['corrected_bolds'],
+                                   function=run_combiner),
+                          joinsource='infosource',
+                          joinfield=['bold_file'],
+                          name='run_joiner')
+        wf.connect(infosource, 'bold', joiner, 'bold_file'])
+
+            """ realign across runs """
+    realign_all = realign_run.clone(name='realign_allruns')
+
+    wf.connect(joiner, 'corrected_bolds', realign_all, 'in_file')
     wf.connect(realign_all, 'out_file', tsnr, 'in_file')
     wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
-   
-### checked upto here
+    # segment and register
     if fs_dir:
         registration = create_fs_reg_workflow()
-        #wf.connect(infosource, 'subject_id', registration, 'inputspec.subject_id')
         registration.inputs.inputspec.subject_id = subject_id
         registration.inputs.inputspec.fs_dir = fs_dir
-        registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
         if target:
             registration.inputs.inputspec.target_image = target
+        else:
+            registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
     else:
         registration = create_reg_workflow()
-        wf.connect(datasource, 'anat', registration, 'inputspec.anatomical_image')
+        registration.inputs.inputspec.anatomical_image = anat
         registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm.nii.gz')
         registration.inputs.inputspec.target_image_brain = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
         registration.inputs.inputspec.config_file = 'T1_2_MNI152_2mm'
+    wf.connect(recalc_median, 'median_file', registration, 'inputspec.mean_image')
+
+    """ Quantify TSNR in each freesurfer ROI """
+    get_roi_tsnr = MapNode(fs.SegStats(), iterfield=['in_file'], 
+                           name='get_aparc_tsnr')
+    get_roi_tsnr.inputs.default_color_table = True
+    get_roi_tsnr.inputs.avgwf_txt_file = True
+    wf.connect(tsnr, 'tsnr_file', get_roi_tsnr, 'in_file')
+    wf.connect(registration, 'outputspec.aparc', get_roi_tsnr, 'segmentation_file')
+
+    """ Detect outliers in a functional imaging series"""
+    art = MapNode(ra.ArtifactDetect(),
+                  iterfield=['realigned_files', 
+                             'realignment_parameters',
+                             'mask_file'],
+                  name="art")
+    art.inputs.use_differences = [True, False]
+    art.inputs.use_norm = True
+    art.inputs.norm_threshold = 1
+    art.inputs.zintensity_threshold = 3
+    art.inputs.mask_type = 'spm_global'
+    art.inputs.parameter_source = 'NiPy'
+    # art wf input connections
+    # realign params per run? How to get them...
+
+    def selectindex(files, idx):
+    """ Utility function for registration seg files """
+        import numpy as np
+        from nipype.utils.filemanip import filename_to_list, list_to_filename
+        return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
+
+
+
+    ####
     def sort_copes(copes, varcopes, contrasts):
     """
     Reorder the copes so that now it combines across runs
@@ -1108,22 +1121,7 @@ def analyze_bids_dataset(bold_files,
                                          ('varcopes', 'inputspec.varcopes'),
                                          ('n_runs', 'l2model.num_copes')]),
                 (modelfit, fixed_fx, [('outputspec.dof_file',
-                                        'inputspec.dof_files'),
-                                      ])
-                ])
-
-    wf.connect(calc_median, 'median_file', registration, 'inputspec.mean_image')
-    if fs_dir:
-        #wf.connect(infosource, 'subject_id', registration, 'inputspec.subject_id')
-        registration.inputs.inputspec.fs_dir = fs_dir
-        registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
-        if target:
-            registration.inputs.inputspec.target_image = target
-    else:
-        wf.connect(datasource, 'anat', registration, 'inputspec.anatomical_image')
-        registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm.nii.gz')
-        registration.inputs.inputspec.target_image_brain = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
-        registration.inputs.inputspec.config_file = 'T1_2_MNI152_2mm'
+                                        'inputspec.dof_files')])])
 
     def merge_files(copes, varcopes, zstats):
         out_files = []
