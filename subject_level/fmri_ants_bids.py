@@ -76,6 +76,19 @@ def median(in_files):
     return filename
 
 
+def rename(in_files, suffix=None):
+    from nipype.utils.filemanip import (filename_to_list, split_filename,
+                                        list_to_filename)
+    out_files = []
+    for idx, filename in enumerate(filename_to_list(in_files)):
+        _, name, ext = split_filename(filename)
+        if suffix is None:
+            out_files.append(name + ('_%03d' % idx) + ext)
+        else:
+            out_files.append(name + suffix + ext)
+    return list_to_filename(out_files)
+
+
 def create_reg_workflow(name='registration'):
     """Create a FEAT preprocessing workflow together with freesurfer
 
@@ -762,6 +775,87 @@ def get_topup_info(layout, bold_files):
     return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
 
 
+def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
+    """Builds a regressor set comprisong motion parameters, composite norm and
+    outliers
+    The outliers are added as a single time point column for each outlier
+    Parameters
+    ----------
+    motion_params: a text file containing motion parameters and its derivatives
+    comp_norm: a text file containing the composite norm
+    outliers: a text file containing 0-based outlier indices
+    detrend_poly: number of polynomials to add to detrend
+    Returns
+    -------
+    components_file: a text file containing all the regressors
+    """
+    out_files = []
+    for idx, filename in enumerate(filename_to_list(motion_params)):
+        params = np.genfromtxt(filename)
+        norm_val = np.genfromtxt(filename_to_list(comp_norm)[idx])
+        out_params = np.hstack((params, norm_val[:, None]))
+        try:
+            outlier_val = np.genfromtxt(filename_to_list(outliers)[idx])
+        except IOError:
+            outlier_val = np.empty((0))
+        for index in np.atleast_1d(outlier_val):
+            outlier_vector = np.zeros((out_params.shape[0], 1))
+            outlier_vector[index] = 1
+            out_params = np.hstack((out_params, outlier_vector))
+        if detrend_poly:
+            timepoints = out_params.shape[0]
+            X = np.empty((timepoints, 0))
+            for i in range(detrend_poly):
+                X = np.hstack((X, legendre(
+                    i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
+            out_params = np.hstack((out_params, X))
+        filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
+        np.savetxt(filename, out_params, fmt="%.10f")
+        out_files.append(filename)
+    return out_files
+
+
+def extract_noise_components(realigned_file, mask_file, num_components=5,
+                             extra_regressors=None):
+    """Derive components most reflective of physiological noise
+    Parameters
+    ----------
+    realigned_file: a 4D Nifti file containing realigned volumes
+    mask_file: a 3D Nifti file containing white matter + ventricular masks
+    num_components: number of components to use for noise decomposition
+    extra_regressors: additional regressors to add
+    Returns
+    -------
+    components_file: a text file containing the noise components
+    """
+    imgseries = nb.load(realigned_file)
+    components = None
+    for filename in filename_to_list(mask_file):
+        mask = nb.load(filename).get_data()
+        if len(np.nonzero(mask > 0)[0]) == 0:
+            continue
+        voxel_timecourses = imgseries.get_data()[mask > 0]
+        voxel_timecourses[np.isnan(np.sum(voxel_timecourses, axis=1)), :] = 0
+        # remove mean and normalize by variance
+        # voxel_timecourses.shape == [nvoxels, time]
+        X = voxel_timecourses.T
+        stdX = np.std(X, axis=0)
+        stdX[stdX == 0] = 1.
+        stdX[np.isnan(stdX)] = 1.
+        stdX[np.isinf(stdX)] = 1.
+        X = (X - np.mean(X, axis=0)) / stdX
+        u, _, _ = sp.linalg.svd(X, full_matrices=False)
+        if components is None:
+            components = u[:, :num_components]
+        else:
+            components = np.hstack((components, u[:, :num_components]))
+    if extra_regressors:
+        regressors = np.genfromtxt(extra_regressors)
+        components = np.hstack((components, regressors))
+    components_file = os.path.join(os.getcwd(), 'noise_components.txt')
+    np.savetxt(components_file, components, fmt="%.10f")
+    return components_file
+
 def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     if not os.path.exists(workdir):
         os.makedirs(workdir)
@@ -829,8 +923,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       use_derivatives=derivatives,
                       outdir=os.path.join(out_dir, subj_label, args.task),
                       name=name)
-
-        if do_topup:
+        # add flag for topup
+        if args.topup:
             num_slices, pe_key, readout, \
             topup_AP, topup_PA, readout_topup = get_topup_info(layout, run_id, 
                                                                bold_files)
@@ -1092,7 +1186,60 @@ def analyze_bids_dataset(bold_files,
         from nipype.utils.filemanip import filename_to_list, list_to_filename
         return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
 
+    # could run into problem with mapnode with filesaving
+    def motion_regressors(motion_params, order=0, derivatives=1):
+    """Compute motion regressors upto given order and derivative
+    motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)
+    """
+    out_files = []
+    for idx, filename in enumerate(filename_to_list(motion_params)):
+        params = np.genfromtxt(filename)
+        out_params = params
+        for d in range(1, derivatives + 1):
+            cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
+                                 params))
+            out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
+        out_params2 = out_params
+        for i in range(2, order + 1):
+            out_params2 = np.hstack((out_params2, np.power(out_params, i)))
+        filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
+        np.savetxt(filename, out_params2, fmt="%.10f")
+        out_files.append(filename)
+    return out_files
 
+    
+    motreg = MapNode(Function(input_names=['motion_params', 'order',
+                                           'derivatives'],
+                              output_names=['out_files'],
+                              function=motion_regressors,
+                              imports=imports),
+                     iterfield=['motion_params']
+                     name='getmotionregress')
+    wf.connect(realign, 'par_file', motreg, 'motion_params')
+    
+    # Create a filter to remove motion and art confounds
+    createfilter1 = MapNode(Function(input_names=['motion_params', 'comp_norm',
+                                               'outliers', 'detrend_poly'],
+                                     output_names=['out_files'],
+                                     function=build_filter1,
+                                     imports=imports),
+                            iterfield=['motion_params']
+                            name='makemotionbasedfilter')
+    createfilter1.inputs.detrend_poly = 2
+    wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
+    wf.connect(art, 'norm_files', createfilter1, 'comp_norm')
+    wf.connect(art, 'outlier_files', createfilter1, 'outliers')
+
+    filter1 = MapNode(fsl.GLM(out_f_name='F_mcart.nii.gz',
+                              out_pf_name='pF_mcart.nii.gz',
+                              demean=True),
+                      iterfield=['in_file', 'design', 'out_res_name'],
+                      name='filtermotion')
+    wf.connect(realign_all, 'out_file', filter1, 'in_file')
+    wf.connect(realign, ('outfile', rename, '_filtermotart'), 
+               filter1, 'out_res_name')
+    # might have problems
+    wf.connect(createfilter1, 'outfiles', filter1, 'design')
 
     ####
     def sort_copes(copes, varcopes, contrasts):
@@ -1357,6 +1504,8 @@ if __name__ == '__main__':
                         help="Session id, ex. 'ses-1'")
     parser.add_argument("--crashdump_dir", dest="crashdump_dir",
                         help="Crashdump dir", default=None)
+    parser.add_argument('--topup', action="store_true",
+                        help="Apply topup correction" + defstr)
 
     args = parser.parse_args()
     data_dir = os.path.abspath(args.datasetdir)
