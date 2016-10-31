@@ -899,7 +899,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
         #use events.tsv eventually
         behav = [x for x in glob(
-                 os.path.join(old_model_dir, 'onsets', subj_label,
+                 os.path.join(old_model_dir, 'test_onsets', subj_label,
                          'task-{}*'.format(task_id), 'cond*.txt'))
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
@@ -917,7 +917,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fs_dir=fs_dir,
                       conds=conds,
                       run_id=run_id,
-                      hpcutoff=args.hpfilter,
+                      hpcutoff=args.highpass_freq,
+                      lpcutoff=args.lowpass_freq,
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
@@ -972,75 +973,6 @@ def analyze_bids_dataset(bold_files,
     modelfit = create_modelfit_workflow()
     modelfit.inputspec.interscan_interval = TR
     fixed_fx = create_fixed_effects_flow()
-
-    def get_highpass(TR, hpcutoff):
-    """ Calculate highpass """
-        return hpcutoff / (2 * TR)
-
-    gethighpass = Node(Function(input_names=['TR', 'hpcutoff'],
-                                output_names=['highpass'],
-                                function=get_highpass),
-                       name='gethighpass')
-    gethighpass.inputs.TR = TR
-    gethighpass.inputs.hpcutoff = hpcutoff
-
-    def get_contrasts(contrast_file, task_id, conds):
-    """ Setup a basic set of contrasts, a t-test per condition """
-        import numpy as np
-        import os
-        contrast_def = []
-        if os.path.exists(contrast_file):
-            with open(contrast_file, 'rt') as fp:
-                contrast_def.extend([np.array(row.split()) for row in fp.readlines() if row.strip()])
-        contrasts = []
-        for row in contrast_def:
-            if row[0] != 'task-%s' % task_id:
-                continue
-            con = [row[1], 'T', ['cond%03d' % (i + 1)  for i in range(len(conds))],
-                   row[2:].astype(float).tolist()]
-            contrasts.append(con)
-        # add auto contrasts for each column
-        for i, cond in enumerate(conds):
-            con = [cond, 'T', ['cond%03d' % (i + 1)], [1]]
-            contrasts.append(con)
-        return contrasts
-
-    contrastgen = Node(Function(input_names=['contrast_file',
-                                             'task_id', 'conds'],
-                                output_names=['contrasts'],
-                                function=get_contrasts),
-                       name='contrastgen')
-
-    contrastgen.inputs.contrast_file = contrast
-    contrastgen.inputs.task_id = task_id
-    contrastgen.inputs.conds = conds
-    wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
-
-    def check_behav_list(behav, run_id, conds):
-        """ Check and reshape cond00x.txt files """
-        import six
-        import numpy as np
-        num_conds = len(conds)
-        if isinstance(behav, six.string_types):
-            behav = [behav]
-        behav_array = np.array(behav).flatten()
-        num_elements = behav_array.shape[0]
-        return behav_array.reshape(num_elements/num_conds, num_conds).tolist()
-
-    reshape_behav = Node(Function(input_names=['behav', 'run_id', 'conds'],
-                                  output_names=['behav'],
-                                  function=check_behav_list),
-                         name='reshape_behav')
-    reshape_behav.inputs.behav = behav
-    reshape_behav.inputs.run_id = run_id
-    reshape_behav.inputs.conds = conds
-
-    modelspec = Node(model.SpecifyModel(),
-                     name="modelspec")
-    modelspec.inputs.input_units = 'secs'
-    modelspec.inputs.time_reptition = TR
-    wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
-
 
     # Start of bold analysis
     if pe_key:
@@ -1110,7 +1042,7 @@ def analyze_bids_dataset(bold_files,
                                      'realign_movpar',
                                      'topup_movpar'],
                           name='topup_joiner')
-        # basically a datasink for each run (use mapnode - iterfield to assign both)
+        # basically a datasink for each run
         wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'topup_corrected_bold')
         wf.connect(realign_run, 'par_file', joiner, 'realign_movpar')
         wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpar')
@@ -1236,12 +1168,153 @@ def analyze_bids_dataset(bold_files,
                       iterfield=['in_file', 'design', 'out_res_name'],
                       name='filtermotion')
     wf.connect(realign_all, 'out_file', filter1, 'in_file')
-    wf.connect(realign, ('outfile', rename, '_filtermotart'), 
+    wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
                filter1, 'out_res_name')
-    # might have problems
-    wf.connect(createfilter1, 'outfiles', filter1, 'design')
+    
+    # might have problems?
+    wf.connect(createfilter1, 'out_files', filter1, 'design')`
 
-    ####
+    createfilter2 = MapNode(Function(input_names=['realigned_file',
+                                                  'mask_file',
+                                                  'num_components',
+                                                  'extra_regressors'],
+                                     output_names=['out_files'],
+                                     function=extract_noise_components,
+                                     imports=imports),
+                            iterfield=['realigned_file', 'extra_regressors'],
+                            name='makecompcorrfilter')
+    createfilter2.inputs.num_components = num_components
+    wf.connect(createfilter1, 'out_files', createfilter2, 'extra_regressors')
+    wf.connect(filter1, 'out_res', createfilter2, 'realigned_file')
+    wf.connect(registration, ('outputspec.segmentation_files', selectindex, [0, 2]),
+               createfilter2, 'mask_file')
+
+    filter2 = MapNode(fsl.GLM(out_f_name='F.nii.gz',
+                              out_pf_name='pF.nii.gz',
+                              demean=True),
+                      iterfield=['in_file', 'design', 'out_res_name'],
+                      name='filter_noise_nosmooth')
+    wf.connect(filter1, 'out_res', filter2, 'in_file')
+    wf.connect(filter1, ('out_res', rename, '_cleaned'),
+               filter2, 'out_res_name')
+    wf.connect(createfilter2, 'out_files', filter2, 'design')
+    wf.connect(mask, 'mask_file', filter2, 'mask')
+
+    bandpass = Node(Function(input_names=['files', 'lowpass_freq',
+                                          'highpass_freq', 'fs'],
+                             output_names=['out_files'],
+                             function=bandpass_filter,
+                             imports=imports),
+                    name='bandpass_unsmooth')
+    bandpass.inputs.fs = 1. / TR
+    bandpass.inputs.highpass_freq = highpass_freq
+    bandpass.inputs.lowpass_freq = lowpass_freq
+    wf.connect(filter2, 'out_res', bandpass, 'files')
+
+    """Smooth the functional data using
+    :class:`nipype.interfaces.fsl.IsotropicSmooth`.
+    """
+
+    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
+    smooth.inputs.fwhm = vol_fwhm
+
+    wf.connect(bandpass, 'out_files', smooth, 'in_file')
+
+    collector = Node(Merge(2), name='collect_streams')
+    wf.connect(smooth, 'out_file', collector, 'in1')
+    wf.connect(bandpass, 'out_files', collector, 'in2')
+
+    """
+    Transform the remaining images. First to anatomical and then to target
+    """
+
+    warpall = MapNode(ants.ApplyTransforms(), iterfield=['input_image'],
+                      name='warpall')
+    warpall.inputs.input_image_type = 3
+    warpall.inputs.interpolation = 'Linear'
+    warpall.inputs.invert_transform_flags = [False, False]
+    warpall.inputs.terminal_output = 'file'
+    warpall.inputs.reference_image = target_file
+    warpall.inputs.args = '--float'
+    warpall.inputs.num_threads = 2
+    warpall.plugin_args = {'sbatch_args': '-c%d' % 2}
+
+    # transform to target
+    wf.connect(collector, 'out', warpall, 'input_image')
+    wf.connect(registration, 'outputspec.transforms', warpall, 'transforms')
+
+    mask_target = Node(fsl.ImageMaths(op_string='-bin'), name='target_mask')
+
+    wf.connect(registration, 'outputspec.anat2target', mask_target, 'in_file')
+
+    maskts = MapNode(fsl.ApplyMask(), iterfield=['in_file'], name='ts_masker')
+    wf.connect(warpall, 'output_image', maskts, 'in_file')
+    wf.connect(mask_target, 'out_file', maskts, 'mask_file')
+
+    # BOLD modeling
+    def get_contrasts(contrast_file, task_id, conds):
+    """ Setup a basic set of contrasts, a t-test per condition """
+        import numpy as np
+        import os
+        contrast_def = []
+        if os.path.exists(contrast_file):
+            with open(contrast_file, 'rt') as fp:
+                contrast_def.extend([np.array(row.split()) for row in fp.readlines() if row.strip()])
+        contrasts = []
+        for row in contrast_def:
+            if row[0] != 'task-%s' % task_id:
+                continue
+            con = [row[1], 'T', ['cond%03d' % (i + 1)  for i in range(len(conds))],
+                   row[2:].astype(float).tolist()]
+            contrasts.append(con)
+        # add auto contrasts for each column
+        for i, cond in enumerate(conds):
+            con = [cond, 'T', ['cond%03d' % (i + 1)], [1]]
+            contrasts.append(con)
+        return contrasts
+
+    contrastgen = Node(Function(input_names=['contrast_file',
+                                             'task_id', 'conds'],
+                                output_names=['contrasts'],
+                                function=get_contrasts),
+                       name='contrastgen')
+    contrastgen.inputs.contrast_file = contrast
+    contrastgen.inputs.task_id = task_id
+    contrastgen.inputs.conds = conds
+    wf.connect(contrastgen, 'contrasts', modelfit, 'inputspec.contrasts')
+
+    def check_behav_list(behav, run_id, conds):
+        """ Check and reshape cond00x.txt files """
+        import six
+        import numpy as np
+        num_conds = len(conds)
+        if isinstance(behav, six.string_types):
+            behav = [behav]
+        behav_array = np.array(behav).flatten()
+        num_elements = behav_array.shape[0]
+        return behav_array.reshape(num_elements/num_conds, num_conds).tolist()
+
+    reshape_behav = Node(Function(input_names=['behav', 'run_id', 'conds'],
+                                  output_names=['behav'],
+                                  function=check_behav_list),
+                         name='reshape_behav')
+    reshape_behav.inputs.behav = behav
+    reshape_behav.inputs.run_id = run_id
+    reshape_behav.inputs.conds = conds
+
+    modelspec = Node(model.SpecifyModel(),
+                     name="modelspec")
+    modelspec.inputs.input_units = 'secs'
+    modelspec.inputs.time_reptition = TR
+    # bold model connections
+    wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
+    wf.connect(realign_all, 'out_file', modelspec, 'functional_runs')
+    wf.connect(joiner, 'nipy_realign_pars', modelspec, 'realignment_parameters')
+    # might have problem with mapnode
+    wf.connect(art, 'outlier_files', modelspec, 'outlier_files')
+    wf.connect(modelspec, 'session_info', modelfit, 'inputspec.session_info')
+    wf.connect(realign_all, 'out_file', modelfit, 'inputspec.functional_data')
+
     def sort_copes(copes, varcopes, contrasts):
     """
     Reorder the copes so that now it combines across runs
@@ -1268,8 +1341,7 @@ def analyze_bids_dataset(bold_files,
     pickfirst = lambda x: x[0]
 
     wf.connect(contrastgen, 'contrasts', cope_sorter, 'contrasts')
-    wf.connect([(preproc, fixed_fx, [(('outputspec.mask', pickfirst),
-                                       'flameo.mask_file')]),
+    wf.connect([(mask, fixed_fx, [(('mask_file', 'flameo.mask_file')]),
                 (modelfit, cope_sorter, [('outputspec.copes', 'copes')]),
                 (modelfit, cope_sorter, [('outputspec.varcopes', 'varcopes')]),
                 (cope_sorter, fixed_fx, [('copes', 'inputspec.copes'),
@@ -1299,6 +1371,7 @@ def analyze_bids_dataset(bold_files,
                                   ('varcopes', 'varcopes'),
                                   ('zstats', 'zstats'),
                                   ])])
+    # ?
     wf.connect(mergefunc, 'out_files', registration, 'inputspec.source_files')
 
     def split_files(in_files, splits):
@@ -1479,8 +1552,10 @@ if __name__ == '__main__':
                         help="Subject prefix" + defstr)
     parser.add_argument('-t', '--task', required=True, #nargs='+',
                         type=str, help="Task name" + defstr)
-    parser.add_argument('--hpfilter', default=120.,
-                        type=float, help="High pass filter cutoff (in secs)" + defstr)
+    parser.add_argument('--hpfilter', default=0.1, type=float, 
+                        help="High pass frequency (Hz)" + defstr)
+    parser.add_argument('--lpfilter', default=0.1, type=float,
+                        help="Low pass frequency (Hz)" + defstr)
     parser.add_argument('--fwhm', default=6.,
                         type=float, help="Spatial FWHM" + defstr)
     parser.add_argument('--derivatives', action="store_true",
