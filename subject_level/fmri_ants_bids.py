@@ -521,12 +521,12 @@ def write_encoding_file(readout, fname, pe=None):
     return filename
 
 
-    def check_topup_dir(tAP, tPA, pe):
+def check_topup_dir(tAP, tPA, pe):
     """ Return orig and opposite fieldmaps """
-        if pe == 'j':
-            return tPA, tAP
-        elif pe == 'j-':
-            return tAP, tPA
+    if pe == 'j':
+        return tPA, tAP
+    elif pe == 'j-':
+        return tAP, tPA
 
 
 def create_topup_workflow(num_slices, pe_key, readout, 
@@ -606,7 +606,7 @@ def create_topup_workflow(num_slices, pe_key, readout,
 
     file_writer_ts = file_writer_topup.clone(name='file_writer_ts')
     file_writer_ts.inputs.readout = readout
-    file_writer_ts.inputs.fname = 'rest_ts'-
+    file_writer_ts.inputs.fname = 'rest_ts'
     topup.connect(inputnode, 'phase_encoding', file_writer_ts, 'pe')
 
     topup.connect(merge_topup, 'merged_file', run_topup, 'in_file')
@@ -874,6 +874,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
     contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
 
+    task_id = args.task
+
     # the master workflow, with subject specific inside
     meta_wf = Workflow('meta_level')
 
@@ -900,7 +902,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         #use events.tsv eventually
         behav = [x for x in glob(
                  os.path.join(old_model_dir, 'test_onsets', subj_label,
-                         'task-{}*'.format(task_id), 'cond*.txt'))
+                         'task-{}*'.format(task_id), 'cond*.txt'))]
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
 
@@ -1051,14 +1053,16 @@ def analyze_bids_dataset(bold_files,
             """ joiner for non-topup """
             return bold_file, realign_movpar
 
-        joiner = JoinNode(Function(input_names=['bold_file'],
+        joiner = JoinNode(Function(input_names=['bold_file',
+                                                'realign_movpar'],
                                    output_names=['corrected_bolds',
                                                  'nipy_realign_pars'],
                                    function=run_combiner),
                           joinsource='infosource',
-                          joinfield=['bold_file'],
+                          joinfield=['bold_file', 'realign_movpar'],
                           name='run_joiner')
-        wf.connect(infosource, 'bold', joiner, 'bold_file'])
+        wf.connect(realign_run, 'out_file', joiner, 'bold_file')
+        wf.connect(realign_run, 'par_file', joiner, 'realign_movpar')
 
     #realign across runs
     realign_all = realign_run.clone(name='realign_allruns')
@@ -1110,34 +1114,33 @@ def analyze_bids_dataset(bold_files,
     art.inputs.parameter_source = 'NiPy'
     wf.connect([(realign_all, art, [('out_file', 'realigned_files')]),
                 (joiner, art, [('nipy_realign_pars', 'realignment_parameters')])
-               ])
+                ])
 
     def selectindex(files, idx):
-    """ Utility function for registration seg files """
+        """ Utility function for registration seg files """
         import numpy as np
         from nipype.utils.filemanip import filename_to_list, list_to_filename
         return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
 
     # could run into problem with mapnode with filesaving
     def motion_regressors(motion_params, order=0, derivatives=1):
-    """Compute motion regressors upto given order and derivative
-    motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)
-    """
-    out_files = []
-    for idx, filename in enumerate(filename_to_list(motion_params)):
-        params = np.genfromtxt(filename)
-        out_params = params
-        for d in range(1, derivatives + 1):
-            cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
-                                 params))
-            out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
-        out_params2 = out_params
-        for i in range(2, order + 1):
-            out_params2 = np.hstack((out_params2, np.power(out_params, i)))
-        filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
-        np.savetxt(filename, out_params2, fmt="%.10f")
-        out_files.append(filename)
-    return out_files
+        """Compute motion regressors upto given order and derivative
+        motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)"""
+        out_files = []
+        for idx, filename in enumerate(filename_to_list(motion_params)):
+            params = np.genfromtxt(filename)
+            out_params = params
+            for d in range(1, derivatives + 1):
+                cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
+                                     params))
+                out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
+            out_params2 = out_params
+            for i in range(2, order + 1):
+                out_params2 = np.hstack((out_params2, np.power(out_params, i)))
+            filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
+            np.savetxt(filename, out_params2, fmt="%.10f")
+            out_files.append(filename)
+        return out_files
 
     
     motreg = MapNode(Function(input_names=['motion_params', 'order',
@@ -1145,7 +1148,7 @@ def analyze_bids_dataset(bold_files,
                               output_names=['out_files'],
                               function=motion_regressors,
                               imports=imports),
-                     iterfield=['motion_params']
+                     iterfield=['motion_params'],
                      name='getmotionregress')
     wf.connect(realign, 'par_file', motreg, 'motion_params')
     
@@ -1155,7 +1158,7 @@ def analyze_bids_dataset(bold_files,
                                      output_names=['out_files'],
                                      function=build_filter1,
                                      imports=imports),
-                            iterfield=['motion_params']
+                            iterfield=['motion_params'],
                             name='makemotionbasedfilter')
     createfilter1.inputs.detrend_poly = 2
     wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
@@ -1172,7 +1175,7 @@ def analyze_bids_dataset(bold_files,
                filter1, 'out_res_name')
     
     # might have problems?
-    wf.connect(createfilter1, 'out_files', filter1, 'design')`
+    wf.connect(createfilter1, 'out_files', filter1, 'design')
 
     createfilter2 = MapNode(Function(input_names=['realigned_file',
                                                   'mask_file',
@@ -1253,7 +1256,7 @@ def analyze_bids_dataset(bold_files,
 
     # BOLD modeling
     def get_contrasts(contrast_file, task_id, conds):
-    """ Setup a basic set of contrasts, a t-test per condition """
+        """ Setup a basic set of contrasts, a t-test per condition """
         import numpy as np
         import os
         contrast_def = []
@@ -1316,9 +1319,7 @@ def analyze_bids_dataset(bold_files,
     wf.connect(realign_all, 'out_file', modelfit, 'inputspec.functional_data')
 
     def sort_copes(copes, varcopes, contrasts):
-    """
-    Reorder the copes so that now it combines across runs
-    """
+        """Reorder the copes so that now it combines across runs"""
         import numpy as np
         if not isinstance(copes, list):
             copes = [copes]
@@ -1341,7 +1342,7 @@ def analyze_bids_dataset(bold_files,
     pickfirst = lambda x: x[0]
 
     wf.connect(contrastgen, 'contrasts', cope_sorter, 'contrasts')
-    wf.connect([(mask, fixed_fx, [(('mask_file', 'flameo.mask_file')]),
+    wf.connect([(mask, fixed_fx, [('mask_file', 'flameo.mask_file')]),
                 (modelfit, cope_sorter, [('outputspec.copes', 'copes')]),
                 (modelfit, cope_sorter, [('outputspec.varcopes', 'varcopes')]),
                 (cope_sorter, fixed_fx, [('copes', 'inputspec.copes'),
@@ -1405,13 +1406,13 @@ def analyze_bids_dataset(bold_files,
         # Sample the average time series in aparc ROIs
         # from rsfmri_vol_surface_preprocessing_nipy.py
         sampleaparc = MapNode(fs.SegStats(default_color_table=True),
-	                          iterfield=['in_file'],
-	                          name='aparc_ts')
+                              iterfield=['in_file'],
+                              name='aparc_ts')
         sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
-	                                     range(49, 55) + [58] + range(1001, 1036) +
-	                                     range(2001, 2036))
+                                         range(49, 55) + [58] + range(1001, 1036) +
+                                         range(2001, 2036))
         sampleaparc.inputs.avgwf_txt_file = True
-	
+    
         wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
         wf.connect(preproc, 'outputspec.realigned_files', sampleaparc, 'in_file')
 
@@ -1573,7 +1574,7 @@ if __name__ == '__main__':
                         help="FreeSurfer subjects directory (if available)")
     parser.add_argument("--target", dest="target_file",
                         help=("Target in MNI space. Best to use the MindBoggle "
-                              "template - only used with FreeSurfer"
+                              "template - only used with FreSurfer"
                               "OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz"))
     parser.add_argument("--session_id", dest="session_id", default=None,
                         help="Session id, ex. 'ses-1'")
