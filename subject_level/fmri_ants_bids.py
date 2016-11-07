@@ -13,7 +13,7 @@ This script demonstrates how to use nipype to analyze a BIDS data set::
 """
 
 from nipype import config
-config.enable_provenance()
+#config.enable_provenance()
 
 import six
 
@@ -883,9 +883,6 @@ def extract_noise_components(realigned_file, mask_file, num_components=5,
 def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     if not os.path.exists(workdir):
         os.makedirs(workdir)
-    new_subj_dir = os.path.join(workdir, 'subjects_dir')
-    if not os.path.exists(new_subj_dir):
-        os.mkdir(new_subj_dir)
     subjs_to_analyze = []
     if args.subject:
         subjs_to_analyze = ['sub-{}'.format(val) for val in args.subject]
@@ -930,6 +927,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
 
+        # until slice timing is fixed, don't use
         kwargs = dict(bold_files=bold_files,
                       anat=anat,
                       target_file=args.target_file,
@@ -937,7 +935,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       task_id=task_id,
                       model_id=args.model,
                       TR=TR,
-                      slice_times=slice_times,
+                      slice_times=None,
                       behav=behav,
                       fs_dir=fs_dir,
                       conds=conds,
@@ -974,8 +972,8 @@ def analyze_bids_dataset(bold_files,
                          task_id, 
                          model_id, 
                          TR,
-                         slice_times,
                          behav,
+                         slice_times=None,
                          target_file=None, 
                          fs_dir=None, 
                          conds=None,
@@ -1021,11 +1019,15 @@ def analyze_bids_dataset(bold_files,
     par_file: (a list of items which are an existing file name)
         Motion parameter files. Angles are not euler angles
     """
-    realign_run = Node(nipy.SpaceTimeRealigner(slice_times=slice_times,
-                                               tr=TR,
-                                               slice_info=2), 
+    # if no slice_times, SpatialRealign algorithm used
+    realign_run = Node(nipy.SpaceTimeRealigner(), 
                        name='realign_per_run')
+    if slice_times:
+        realign_run.inputs.slice_times = slice_times
+        realign_run.inputs.slice_info = 2
+        realign_run.inputs.tr = TR
     realign_run.plugin_args = {'sbatch_args': '-c 4'}
+    wf.connect(infosource, 'bold', realign_run, 'in_file')
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
     tsnr = Node(TSNR(regress_poly=2), name='tsnr')
@@ -1046,7 +1048,6 @@ def analyze_bids_dataset(bold_files,
                                       readout_topup, name='topup')
         topup.inputs.inputspec.topup_AP = topup_AP
         topup.inputs.inputspec.topup_PA = topup_PA
-        wf.connect(infosource, 'bold', realign_run, 'in_file')
         wf.connect(infosource, 'pe', topup, 'inputspec.phase_encoding')
         wf.connect(realign_run, 'out_file', topup, 'inputspec.realigned_files')
         wf.connect(realign_run, 'out_file', calc_median, 'in_files')
@@ -1073,6 +1074,7 @@ def analyze_bids_dataset(bold_files,
         wf.connect(realign_run, 'par_file', joiner, 'realign_movpar')
         wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpar')
     else:
+        
         def run_combiner(bold_file, realign_movpar):
             """ joiner for non-topup """
             return bold_file, realign_movpar
@@ -1423,13 +1425,13 @@ def analyze_bids_dataset(bold_files,
         # Sample the average time series in aparc ROIs
         # from rsfmri_vol_surface_preprocessing_nipy.py
         sampleaparc = MapNode(fs.SegStats(default_color_table=True),
-                              iterfield=['in_file'],
-                              name='aparc_ts')
+	                          iterfield=['in_file'],
+	                          name='aparc_ts')
         sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
-                                         range(49, 55) + [58] + range(1001, 1036) +
-                                         range(2001, 2036))
+	                                     range(49, 55) + [58] + range(1001, 1036) +
+	                                     range(2001, 2036))
         sampleaparc.inputs.avgwf_txt_file = True
-    
+	
         wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
         wf.connect(realign_all, 'out_file', sampleaparc, 'in_file')
 
@@ -1487,9 +1489,9 @@ def analyze_bids_dataset(bold_files,
                                    function=get_subs),
                       name='subsgen')
     subsgen.inputs.subject_id = subject_id
-    subsgen.model_id = model_id
-    subsgen.task_id = task_id
-    subsgen.run_id = run_id
+    subsgen.inputs.model_id = model_id
+    subsgen.inputs.task_id = task_id
+    subsgen.inputs.run_id = run_id
 
     datasink = Node(DataSink(),
                     name="datasink")
@@ -1595,7 +1597,8 @@ if __name__ == '__main__':
                         help="Crashdump dir", default=None)
     parser.add_argument('--topup', action="store_true",
                         help="Apply topup correction" + defstr)
-
+    parser.add_argument('--debug', action="store_true",
+                        help="Activate nipype debug mode" + defstr)
     args = parser.parse_args()
     data_dir = os.path.abspath(args.datasetdir)
     out_dir = args.outdir
@@ -1620,6 +1623,11 @@ if __name__ == '__main__':
     if fs_dir is not None:
         fs_dir = os.path.abspath(fs_dir)
 
+    if args.debug:
+        from nipype import logging
+        config.enable_debug_mode()
+        logging.update_logging(config)
+        
     wf = create_workflow(data_dir, args, 
                          fs_dir, derivatives,
                          work_dir, out_dir)
@@ -1629,7 +1637,7 @@ if __name__ == '__main__':
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
     
-    if not (args.crashdump_dir is None):
+    if args.crashdump_dir:
         wf.config['execution']['crashdump_dir'] = args.crashdump_dir
 
     if args.plugin_args:
