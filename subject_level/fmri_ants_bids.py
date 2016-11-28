@@ -109,8 +109,6 @@ def create_reg_workflow(name='registration'):
     Outputs:
 
         outputspec.func2anat_transform : FLIRT transform
-        outputspec.anat2target_transform : FLIRT+FNIRT transform
-        outputspec.transformed_files : transformed files in target space
         outputspec.transformed_mean : mean image in target space
 
     Example
@@ -123,7 +121,6 @@ def create_reg_workflow(name='registration'):
                                                'mean_image',
                                                'anatomical_image',
                                                'target_image',
-                                               'target_image_brain',
                                                'config_file']),
                         name='inputspec')
     outputnode = Node(IdentityInterface(fields=['func2anat_transform',
@@ -235,7 +232,7 @@ def create_reg_workflow(name='registration'):
     reg.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=6G -c 4'}
     register.connect(stripper, 'out_file', reg, 'moving_image')
-    register.connect(inputnode,'target_image_brain', reg,'fixed_image')
+    register.connect(inputnode,'target_image', reg,'fixed_image')
 
 
     """
@@ -260,7 +257,7 @@ def create_reg_workflow(name='registration'):
     warpmean.inputs.invert_transform_flags = [False, False]
     warpmean.inputs.terminal_output = 'file'
 
-    register.connect(inputnode,'target_image_brain', warpmean,'reference_image')
+    register.connect(inputnode,'target_image', warpmean,'reference_image')
     register.connect(inputnode, 'mean_image', warpmean, 'input_image')
     register.connect(merge, 'out', warpmean, 'transforms')
 
@@ -276,7 +273,7 @@ def create_reg_workflow(name='registration'):
     warpall.inputs.invert_transform_flags = [False, False]
     warpall.inputs.terminal_output = 'file'
 
-    register.connect(inputnode,'target_image_brain',warpall,'reference_image')
+    register.connect(inputnode,'target_image',warpall,'reference_image')
     register.connect(inputnode,'source_files', warpall, 'input_image')
     register.connect(merge, 'out', warpall, 'transforms')
 
@@ -801,7 +798,7 @@ def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
                     i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
             out_params = np.hstack((out_params, X))
         filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
-        np.savetxt(filename, out_params, fmt="%.10f")
+        np.savetxt(filename, out_params, fmt=str("%.10f"))
         out_files.append(filename)
     return out_files
 
@@ -877,7 +874,7 @@ def extract_noise_components(realigned_file, mask_file, num_components=5,
         regressors = np.genfromtxt(extra_regressors)
         components = np.hstack((components, regressors))
     components_file = os.path.join(os.getcwd(), 'noise_components.txt')
-    np.savetxt(components_file, components, fmt="%.10f")
+    np.savetxt(components_file, components, fmt=str("%.10f"))
     return components_file
 
 def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
@@ -890,8 +887,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
-    old_model_dir = os.path.join(os.path.join(data_dir, 'code', 'model', 
-                                              'model{:3d}'.format(args.model)))
+    old_model_dir = os.path.join(os.path.join(bids_dir, 'code', 'model', 
+                                              'model{:0>3d}'.format(args.model)))
 
     contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
 
@@ -945,7 +942,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
-                      outdir=os.path.join(out_dir, subj_label, args.task),
+                      outdir=os.path.join(outdir, subj_label, args.task),
                       name=name)
         # add flag for topup
         if args.topup:
@@ -978,7 +975,7 @@ def analyze_bids_dataset(bold_files,
                          fs_dir=None, 
                          conds=None,
                          run_id=None,
-                         highpass_freq=0.1,
+                         highpass_freq=0.01,
                          lowpass_freq=0.1, 
                          fwhm=6., 
                          contrast=None,
@@ -1110,7 +1107,6 @@ def analyze_bids_dataset(bold_files,
         registration = create_reg_workflow()
         registration.inputs.inputspec.anatomical_image = anat
         registration.inputs.inputspec.target_image = fsl.Info.standard_image('MNI152_T1_2mm.nii.gz')
-        registration.inputs.inputspec.target_image_brain = fsl.Info.standard_image('MNI152_T1_2mm_brain.nii.gz')
         registration.inputs.inputspec.config_file = 'T1_2_MNI152_2mm'
     wf.connect(recalc_median, 'median_file', registration, 'inputspec.mean_image')
 
@@ -1164,27 +1160,26 @@ def analyze_bids_dataset(bold_files,
             for i in range(2, order + 1):
                 out_params2 = np.hstack((out_params2, np.power(out_params, i)))
             filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
-            np.savetxt(filename, out_params2, fmt="%.10f")
+            np.savetxt(filename, out_params2, fmt=str("%.10f"))
             out_files.append(filename)
         return out_files
 
     
-    motreg = MapNode(Function(input_names=['motion_params', 'order',
-                                           'derivatives'],
-                              output_names=['out_files'],
-                              function=motion_regressors,
-                              imports=imports),
-                     iterfield=['motion_params'],
-                     name='getmotionregress')
+    motreg = Node(Function(input_names=['motion_params', 'order',
+                                        'derivatives'],
+                           output_names=['out_files'],
+                           function=motion_regressors,
+                           imports=imports),
+                  name='getmotionregress')
     wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
     
     # Create a filter to remove motion and art confounds
-    createfilter1 = MapNode(Function(input_names=['motion_params', 'comp_norm',
+    createfilter1 = Node(Function(input_names=['motion_params', 'comp_norm',
                                                'outliers', 'detrend_poly'],
-                                     output_names=['out_files'],
-                                     function=build_filter1,
-                                     imports=imports),
-                            iterfield=['motion_params'],
+                                  output_names=['out_files'],
+                                  function=build_filter1,
+                                  imports=imports),
+                            #iterfield=['motion_params'],
                             name='makemotionbasedfilter')
     createfilter1.inputs.detrend_poly = 2
     wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
@@ -1199,8 +1194,6 @@ def analyze_bids_dataset(bold_files,
     wf.connect(realign_all, 'out_file', filter1, 'in_file')
     wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
                filter1, 'out_res_name')
-    
-    # might have problems?
     wf.connect(createfilter1, 'out_files', filter1, 'design')
 
     createfilter2 = MapNode(Function(input_names=['realigned_file',
@@ -1334,6 +1327,9 @@ def analyze_bids_dataset(bold_files,
                      name="modelspec")
     modelspec.inputs.input_units = 'secs'
     modelspec.inputs.time_repetition = TR
+    # in seconds
+    modelspec.inputs.high_pass_filter_cutoff = (1./highpass_freq)
+
     # bold model connections
     wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
     wf.connect(realign_all, 'out_file', modelspec, 'functional_runs')
@@ -1397,7 +1393,6 @@ def analyze_bids_dataset(bold_files,
                                   ('varcopes', 'varcopes'),
                                   ('zstats', 'zstats'),
                                   ])])
-    # sure...
     wf.connect(mergefunc, 'out_files', registration, 'inputspec.source_files')
 
     def split_files(in_files, splits):
@@ -1435,19 +1430,16 @@ def analyze_bids_dataset(bold_files,
         wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
         wf.connect(realign_all, 'out_file', sampleaparc, 'in_file')
 
-    """
-    Connect to a datasink
-    """
-
     def get_subs(subject_id, conds, run_id, model_id, task_id):
+        """ Substitutions for files saved in datasink """
         subs = [('_subject_id_%s_' % subject_id, '')]
         subs.append(('_model_id_%d' % model_id, 'model%03d' %model_id))
-        subs.append(('task_id_%d/' % task_id, '/task%03d_' % task_id))
+        subs.append(('task_id_%s/' % task_id, '/task-%s_' % task_id))
         subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_warp',
         'mean'))
         subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_flirt',
         'affine'))
-
+        # substitutions per condition
         for i in range(len(conds)):
             subs.append(('_flameo%d/cope1.' % i, 'cope%02d.' % (i + 1)))
             subs.append(('_flameo%d/varcope1.' % i, 'varcope%02d.' % (i + 1)))
@@ -1467,17 +1459,19 @@ def analyze_bids_dataset(bold_files,
             subs.append(('_warpall%d/zstat1_trans.' % (2 * len(conds) + i),
                          'zstat%02d.' % (i + 1)))
             subs.append(('__get_aparc_means%d/' % i, '/cope%02d_' % (i + 1)))
-
+        # substitutions per run
         for i, run_num in enumerate(run_id):
             subs.append(('__get_aparc_tsnr%d/' % i, '/run%02d_' % run_num))
             subs.append(('__art%d/' % i, '/run%02d_' % run_num))
             subs.append(('__dilatemask%d/' % i, '/run%02d_' % run_num))
             subs.append(('__realign%d/' % i, '/run%02d_' % run_num))
             subs.append(('__modelgen%d/' % i, '/run%02d_' % run_num))
-        subs.append(('/model%03d/task%03d_' % (model_id, task_id), '/'))
+
+        subs.append(('/%s/%s/' % (task_id, subject_id), '/task-%s/' % task_id))
+        subs.append(('/model%03d/task-%s_' % (model_id, task_id), '/'))
         subs.append(('_bold_dtype_mcf_bet_thresh_dil', '_mask'))
-        subs.append(('mask/model%03d/task%03d/' % (model_id, task_id), 'mask/'))
-        subs.append(('tsnr/model%03d/task%03d/' % (model_id, task_id), 'tsnr/'))
+        subs.append(('mask/model%03d/task-%s/' % (model_id, task_id), 'mask/'))
+        subs.append(('tsnr/model%03d/task-%s/' % (model_id, task_id), 'tsnr/'))
         subs.append(('_output_warped_image', '_anat2target'))
         subs.append(('median_flirt_brain_mask', 'median_brain_mask'))
         subs.append(('median_bbreg_brain_mask', 'median_brain_mask'))
@@ -1493,9 +1487,10 @@ def analyze_bids_dataset(bold_files,
     subsgen.inputs.task_id = task_id
     subsgen.inputs.run_id = run_id
 
-    datasink = Node(DataSink(),
-                    name="datasink")
+    # Sink data of interest
+    datasink = Node(DataSink(), name="datasink")
     datasink.inputs.container = subject_id
+
     wf.connect(contrastgen, 'contrasts', subsgen, 'conds')
     wf.connect(subsgen, 'substitutions', datasink, 'substitutions')
     wf.connect([(fixed_fx.get_node('outputspec'), datasink,
@@ -1513,7 +1508,6 @@ def analyze_bids_dataset(bold_files,
     wf.connect([(joiner, datasink, [('nipy_realign_pars',
                                       'qa.motion')]),
                 (mask, datasink, [('mask_file', 'qa.mask')])])
-    #wf.connect(registration, 'outputspec.mean2anat_mask', datasink, 'qa.mask.mean2anat')
     wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
     wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
     wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
@@ -1568,7 +1562,7 @@ if __name__ == '__main__':
                         help="Subject prefix" + defstr)
     parser.add_argument('-t', '--task', required=True, #nargs='+',
                         type=str, help="Task name" + defstr)
-    parser.add_argument('--hpfilter', default=0.1, type=float, 
+    parser.add_argument('--hpfilter', default=0.01, type=float, 
                         help="High pass frequency (Hz)" + defstr)
     parser.add_argument('--lpfilter', default=0.1, type=float,
                         help="Low pass frequency (Hz)" + defstr)
@@ -1600,18 +1594,19 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action="store_true",
                         help="Activate nipype debug mode" + defstr)
     args = parser.parse_args()
+    
     data_dir = os.path.abspath(args.datasetdir)
-    out_dir = args.outdir
-    work_dir = os.getcwd()
-
     if args.work_dir:
-        work_dir = os.path.abspath(args.work_dir)
+        workdir = os.path.abspath(args.work_dir)
+    else:
+        workdir = os.getcwd()
     if args.outdir:
         outdir = os.path.abspath(args.outdir)
     else:
-        outdir = os.path.join(work_dir, 'output')
+        outdir = os.path.join(workdir, 'output')
     if args.crashdump_dir:
         crashdump = os.path.abspath(args.crashdump_dir)
+        wf.config['execution']['crashdump_dir'] = crashdump
     else:
         crashdump = os.getcwd()
 
@@ -1630,16 +1625,13 @@ if __name__ == '__main__':
         
     wf = create_workflow(data_dir, args, 
                          fs_dir, derivatives,
-                         work_dir, out_dir)
-    wf.base_dir = work_dir
+                         workdir, outdir)
+    wf.base_dir = workdir
     
     # Optional changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
     
-    if args.crashdump_dir:
-        wf.config['execution']['crashdump_dir'] = args.crashdump_dir
-
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
