@@ -335,6 +335,7 @@ def create_fs_reg_workflow(name='registration'):
                                                 'out_reg_file',
                                                 'anat2target_transform',
                                                 'transforms',
+                                                'transformed_files',
                                                 'transformed_mean',
                                                 'segmentation_files',
                                                 'anat2target',
@@ -478,7 +479,23 @@ def create_fs_reg_workflow(name='registration'):
     register.connect(inputnode, 'target_image', warpmean, 'reference_image')
     register.connect(inputnode, 'mean_image', warpmean, 'input_image')
     register.connect(merge, 'out', warpmean, 'transforms')
+    
+    """
+    Transform the remaining images. First to anatomical and then to target
+    """
+    warpall = MapNode(ants.ApplyTransforms(),
+                         iterfield=['input_image'],
+                         name='warpall')
+    warpall.inputs.input_image_type = 0
+    warpall.inputs.interpolation = 'Linear'
+    warpall.inputs.invert_transform_flags = [False, False]
+    warpall.inputs.terminal_output = 'file'
+    warpall.inputs.args = '--float'
 
+    register.connect(inputnode, 'target_image', warpall, 'reference_image')
+    register.connect(inputnode, 'source_files', warpall, 'input_image')
+    register.connect(merge, 'out', warpall, 'transforms')
+    register.connect(warpall, 'output_image', outputnode, 'transformed_files')
     """
     Assign all the output files
     """
@@ -942,7 +959,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
-                      outdir=os.path.join(outdir, subj_label, args.task),
+                      outdir=os.path.join(outdir, subj_label),
                       name=name)
         # add flag for topup
         if args.topup:
@@ -1407,7 +1424,7 @@ def analyze_bids_dataset(bold_files,
                                      function=split_files),
                       name='split_files')
     wf.connect(mergefunc, 'splits', splitfunc, 'splits')
-    wf.connect(registration, 'outputspec.transforms',
+    wf.connect(registration, 'outputspec.transformed_files',
                splitfunc, 'in_files')
 
     if fs_dir:
