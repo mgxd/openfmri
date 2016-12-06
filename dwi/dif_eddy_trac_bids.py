@@ -14,16 +14,13 @@ from glob import glob
 import argparse
 
 from nipype import (Node, Workflow, MapNode, Function, 
-                    IdentityInterface, Datasink)
+                    IdentityInterface, DataSink)
 from nipype.interfaces.fsl import (Eddy, TOPUP, BET)
 from nipype.interfaces.io import SelectFiles
 
-from nipype.workflows.dmri.fsl import (create_bedpostx_pipeline,
-                                       bedpostx_parallel) #use these?
-
 from bids.grabbids import BIDSLayout
 
-def get_diff_info(layout, files)
+def get_diff_info(layout, files):
     """ Return phase encoding direction for each dwi """
     pe_key = []
     for dwi in files:
@@ -35,77 +32,88 @@ def get_diff_info(layout, files)
                         * layout.get_metadata(dwi)['EffectiveEchoSpacing'])
     return pe_key, readout
 
-def create_diffusion_workflow(bids_dir, work_dir, session=None, subjects=[], config_dir):
+def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir, session=None, subjects=None):
     """ Creates metaworkflow and iterates through subjects - grabs diffusion weighted images, 
         bvals, and bvecs from each subject (using pybids) and analyzes at subject level """
-    layout = BIDSLayout(bids_dir)
+
     if not os.path.exists(work_dir):
         os.makedirs(work_dir)
+
     subjs_to_analyze = []
+    layout = BIDSLayout(bids_dir)
     if subjects:
-        subjects_to_analyze = ['sub-{}'.format(val) for val in args.subjects]
+        subjs_to_analyze = ['sub-{}'.format(val) for val in subjects]
     else:
         subjs_to_analyze = ['sub-{}'.format(val) for val in layout.get_subjects()]
+
+    print(subjs_to_analyze)
+
     trac_config = os.path.join(config_dir, 'tracula_config')
+    
     meta_wf = Workflow(name='meta_level')
+    
     for subj_label in subjs_to_analyze:
         subj = subj_label.replace('sub-','')
+        print(subj)
         if session:
             dwis = sorted([f.filename for f in 
-                           layout.get(subject=subj, type=['dwi'],
+                           layout.get(subject=subj, type='dwi',
                                       session=session_id,
                                       extensions=['nii.gz','nii'])])
             bvals = sorted([f.filename for f in 
-                            layout.get(subject=subj, type=['dwi'],
+                            layout.get(subject=subj, type='dwi',
                                        session=session_id,
                                        extensions=['bval'])])
             bvecs = sorted([f.filename for f in
-                            layout.get(subject=subj, type=['dwi'],
+                            layout.get(subject=subj, type='dwi',
                                        session=session_id,
                                        extensions=['bvec'])])
         else:
             dwis = sorted([f.filename for f in 
-                           layout.get(subject=subj, type=['dwi'], 
+                           layout.get(subject=subj, type='dwi', 
                                       extensions=['nii.gz','nii'])])
             bvals = sorted([f.filename for f in 
-                            layout.get(subject=subj, type=['dwi'],
+                            layout.get(subject=subj, type='dwi',
                                        extensions=['bval'])])
             bvecs = sorted([f.filename for f in
-                            layout.get(subject=subj, type=['dwi'],
+                            layout.get(subject=subj, type='dwi',
                                        extensions=['bvec'])])
-        
-        pe_key, readout = get_diff_info(layout, dwis)
 
-        kwargs = dict(dwis=dwis,
+        name = '{}_diffusion'.format(subj_label)
+        pe_key, readout = get_diff_info(layout, dwis)
+        kwargs = dict(sid=subj_label,
+                      dwis=dwis,
                       bvals=bvals,
                       bvecs=bvecs,
                       pe_key=pe_key,
                       readout=readout,
-                      trac_config=trac_config)
-
+                      tracula_config=trac_config,
+                      tracula_dir=os.path.join(trac_dir, subj_label),
+                      name=name)
         wf = analyze_diffusion(**kwargs)
         meta_wf.add_nodes([wf])
 
     return meta_wf
 
 
-def analyze_diffusion(dwis, bvals, bvecs, pe_key):
+def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout, 
+                      tracula_config, tracula_dir, name='eddy_trac_csd'):
     """ annotate when finished """
 
-    infosource = Node(IdentityInterface(fields=['dwis', 'bvals', 'bvecs']
+    if not os.path.exists(tracula_dir):
+        os.makedirs(tracula_dir)
+    wf = Workflow(name=name)
+
+    infosource = Node(IdentityInterface(fields=['dwis', 'bvals', 'bvecs']),
+                      name='inputnode')
     infosource.inputs.dwis = dwis
     infosource.inputs.bvals = bvals
     infosource.inputs.bvecs = bvecs
+    
+    wf.connect(infosource, 'dwis', preproc, 'in_files')
+    wf.connect(infosource, 'bvals', preproc, 'bval_files')
+    wf.connect(infosource, 'bvecs', preproc, 'bvec_files')
 
-    #datasource.inputs.field_template = {
-    #             'dwi1': '%s/%s/dwi/%s_%s_dir-AP_dwi.nii.gz',
-    #             'bval1': '%s/%s/dwi/%s_%s_dir-AP_dwi.bval',
-    #             'bvec1': '%s/%s/dwi/%s_%s_dir-AP_dwi.bvec',
-    #             'dwi2': '%s/%s/fmap/%s_%s_dir-PA_dwi.nii.gz',
-    #             'bval2': 'code/dwi_PA001.bvals', #problem?
-    #             'bvec2': 'code/dwi_PA001.bvecs'} #problem?
-    #datasource.inputs.sort_filelist = True
-    #datasource.inputs.raise_on_empty = False
 
     # Find readout
     def create_files(in_files, bval_files, bvec_files, order, readout):
@@ -127,8 +135,8 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
             index[b0idx] = 1
             index = np.cumsum(index)
             indices.extend(len(acqparams) + index)
-            acqp = dict(j=[0, -1, 0, '{:.4f}'.format(readout)], 
-                        j-=[0, 1, 0, '{:.4f}'.format(readout)])[order[idx]]
+            acqp = {'j': [0, -1, 0, '{:.4f}'.format(readout)], 
+                    'j-': [0, 1, 0, '{:.4f}'.format(readout)]}[order[idx]]
             for _ in range(len(b0idx)):
                 acqparams.append(acqp)
             vals = np.genfromtxt(bvec_files[idx])
@@ -161,7 +169,7 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
     preproc.inputs.order = pe_key    
 
     def rotate_bvecs(bvec_file, par_file):
-    """ Rotates bvecs """
+        """ Rotates bvecs """
         import os
         import numpy as np
         pars = np.genfromtxt(par_file)
@@ -195,7 +203,7 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
     """
 
     def run_prep(sid, template, nifti, bvec, bval, tracula_dir):
-    """ Runs trac-all from command line, could convert into interface """
+        """ Runs trac-all from command line, could convert into interface """
         from glob import glob
         import oss
         from string import Template
@@ -220,11 +228,8 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
                           function=run_prep),
                  name='trac-prep')
     
-    # skipping this with nipype example workflow
     def run_bedpost(sid, tracula_dir, dwi_file):
-    """ could replace with from nipype.workflows.dmri.fsl.dti import create_bedpostx_pipeline
-        inputs: dwi, mask, bvecs, bvals 
-        outputs: dyads, dyads_disp"""
+        """ """
         import os
         import shutil
         from nipype.interfaces.base import CommandLine
@@ -238,16 +243,16 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
         os.chdir(pwd)
         return sid, bedpost_file
     
-    bedpost = create_bedpostx_pipeline()
+    #bedpost = create_bedpostx_pipeline()
     
-    #node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'], 
-    #                     output_names=['sid', 'bedpost_file'], function=run_bedpost), 
-    #            name='trac-bedp')
-    #node2.inputs.tracula_dir = tracula_dir
-    #node2.plugin_args = {'sbatch_args': '--gres=gpu:1',
-    #                      'overwrite': True}
-    #wf.connect(node1, 'sid', node2, 'sid')
-    #wf.connect(node1, 'dwi_file', node2, 'dwi_file')
+    node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'], 
+                         output_names=['sid', 'bedpost_file'], function=run_bedpost), 
+                 name='trac-bedp')
+    node2.inputs.tracula_dir = tracula_dir
+    node2.plugin_args = {'sbatch_args': '--gres=gpu:1',
+                          'overwrite': True}
+    wf.connect(node1, 'sid', node2, 'sid')
+    wf.connect(node1, 'dwi_file', node2, 'dwi_file')
 
    
 
@@ -400,29 +405,6 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
         return tensor_fa_file, tensor_evec_file, model_gfa_file, sl_fname
 
 
-    wf = Workflow(name='eddy_trac_csd')
-
-    #wf.connect([(infosource, datasource, [('subject_id', 'subject_id'),
-    #                                      ('session', 'session')])])
-
-    #wf.connect([(datasource, dwis, [('dwi1', 'in1'),
-    #                            ('dwi2', 'in2')])])
-
-    #wf.connect([(datasource, b_vals, [('bval1', 'in1'),
-    #                              ('bval2', 'in2')])])
-
-    #wf.connect([(datasource, b_vecs, [('bvec1', 'in1'),
-    #                             ('bvec2', 'in2')])])
-
-
-    wf.connect(dwis, 'out', preproc, 'in_files')
-    wf.connect(b_vals, 'out', preproc, 'bval_files')
-    wf.connect(b_vecs, 'out', preproc, 'bvec_files')
-
-    #wf.connect([(select, preproc, [('dwi', 'in_files'),
-    #                               ('bvals', 'bval_files'),
-    #                               ('bvecs', 'bvec_files')])])
-
     topup = Node(TOPUP(out_corrected='b0correct.nii.gz', numprec='float', output_type='NIFTI_GZ'), name='topup')
     wf.connect(preproc, 'acq_file', topup, 'encoding_file')
     wf.connect(preproc, 'b0file', topup, 'in_file')
@@ -453,7 +435,7 @@ def analyze_diffusion(dwis, bvals, bvecs, pe_key):
     node1 = Node(Function(input_names=['sid', 'template', 'nifti', 'bvec', 'bval', 'tracula_dir'],
                           output_names=['sid', 'config_file', 'dwi_file'], function=run_prep),
                 name='trac-prep')
-    node1.inputs.template = os.path.abspath('tracula_config')
+    node1.inputs.template = tracula_config
     node1.inputs.tracula_dir = tracula_dir
 
     wf.connect(infosource, 'subject_id', node1, 'sid')
@@ -514,19 +496,19 @@ def main(args=None):
     defstr = ' default %(default)s'
     parser.add_argument('-d', dest='datadir', required=True,
                         help="BIDS dataset directory")
-    parser.add_argument('--subjects', default=[],
+    parser.add_argument('-s', '--subjects', default=[],
                         type=str, nargs='+',
                         help="Specific subjects to run (minus sub- prefix)")
-    parser.add_argument('-s', dest='session', default=None,
+    parser.add_argument('-ss', dest='session', default=None,
                         help="Session ID (ses-[input])" + defstr)
     parser.add_argument('-c', dest='config',
                         help="Directory where tracula config file is located")
     parser.add_argument('-w', dest='workdir', 
                         help="Working directory")
+    parser.add_argument('-t', dest='tracdir', 
+                        help="Directory where tracula will output")
     parser.add_argument('-p', dest='plugin', default='MultiProc',
                         help="Plugin to use" + defstr)
-    parser.add_argument('-t', dest='tracdir', required=True,
-                        help="Tracula directory")
     parser.add_argument('-o', dest='outdir', 
                         help="Output directory")
     parser.add_argument('--plugin_args',
@@ -544,6 +526,10 @@ def main(args=None):
         outdir = os.path.abspath(args.outdir)
     else:
         outdir = os.path.join(os.getcwd(), 'output')
+    if args.tracdir:
+        tracdir = os.path.abspath(args.tracdir)
+    else:
+        tracdir = os.path.join(bids_dir, 'derivatives', 'diffusion')
     if args.config:
         config_dir = os.path.abspath(args.config)
     else:
@@ -553,9 +539,9 @@ def main(args=None):
         config.enable_debug_mode()
         logging.update_logging(config)
 
-    wf = create_workflow(bids_dir, workdir, outdir,
-                         args.session, args.subjects,
-                         config_dir)
+    wf = create_diffusion_workflow(bids_dir, workdir, tracdir,
+                                   config_dir, args.session,
+                                   args.subjects)
     wf.base_dir = workdir
 
     # run the workflow
