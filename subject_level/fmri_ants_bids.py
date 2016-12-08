@@ -51,35 +51,8 @@ imports = ['import os',
            'from scipy.special import legendre'
            ]
 
-def median(in_files):
-    """Computes an average of the median of each realigned timeseries
-
-    Parameters
-    ----------
-
-    in_files: one or more realigned Nifti 4D time series
-
-    Returns
-    -------
-
-    out_file: a 3D Nifti file
-    """
-    average = None
-    for idx, filename in enumerate(filename_to_list(in_files)):
-        img = nb.load(filename)
-        data = np.median(img.get_data(), axis=3)
-        if average is None:
-            average = data
-        else:
-            average = average + data
-    median_img = nb.Nifti1Image(average/float(idx + 1),
-                                img.get_affine(), img.get_header())
-    filename = os.path.join(os.getcwd(), 'median.nii.gz')
-    median_img.to_filename(filename)
-    return filename
-
-
 def rename(in_files, suffix=None):
+    """ Utility function to keep files unique """
     from nipype.utils.filemanip import (filename_to_list, split_filename,
                                         list_to_filename)
     out_files = []
@@ -516,29 +489,6 @@ def create_fs_reg_workflow(name='registration'):
                      outputnode, 'min_cost_file')
     return register
 
-
-def write_encoding_file(readout, fname, pe=None):
-    """ Write topup encoding file """
-    import os
-    if pe == 'j':
-        direction = 1
-    elif (pe == 'j-') or not pe:
-        direction = -1
-    filename = os.path.join(os.getcwd(), 'acq_param_%s.txt' % fname)
-    with open(filename, 'w') as f:  
-        f.writelines(['0 %d 0 %s\n' % (direction, readout),    
-                      '0 %d 0 %s\n' % (direction * -1, readout)])
-    return filename
-
-
-def check_topup_dir(tAP, tPA, pe):
-    """ Return orig and opposite fieldmaps """
-    if pe == 'j':
-        return tPA, tAP
-    elif pe == 'j-':
-        return tAP, tPA
-
-
 def create_topup_workflow(num_slices, readout, 
                           readout_topup, name='topup'):
     """Create a geometric distortion correction workflow using TOPUP 
@@ -596,6 +546,19 @@ def create_topup_workflow(num_slices, readout,
                         name='merge_topup')
     topup.connect(make_topup_list, 'out', merge_topup, 'in_files')
 
+    def write_encoding_file(readout, fname, pe=None):
+        """ Write topup encoding file """
+        import os
+        if pe == 'j':
+            direction = 1
+        elif (pe == 'j-') or not pe:
+            direction = -1
+        filename = os.path.join(os.getcwd(), 'acq_param_%s.txt' % fname)
+        with open(filename, 'w') as f:  
+            f.writelines(['0 %d 0 %s\n' % (direction, readout),    
+                          '0 %d 0 %s\n' % (direction * -1, readout)])
+        return filename
+
     file_writer_topup = Node(Function(input_names=['readout', 'fname',
                                                    'pe'],
                                 output_names=['encoding_file'],
@@ -652,6 +615,13 @@ def create_topup_workflow(num_slices, readout,
         extract_main.inputs.crop_list = [(0,-1), (0,-1), (0,-1), (0,1)]
 
         extract_opp = extract_main.clone(name='extract_opp')
+    
+    def check_topup_dir(tAP, tPA, pe):
+        """ Helper Function to return orig and opposite fieldmaps """
+        if pe == 'j':
+            return tPA, tAP
+        elif pe == 'j-':
+            return tAP, tPA
 
     check_dirs = Node(Function(input_names=['tAP', 'tPA', 'pe'],
                                output_names=['main', 'opp'],
@@ -779,120 +749,6 @@ def get_topup_info(layout, bold_files):
     # keep track of directions
     pe_key = [layout.get_metadata(bold)['PhaseEncodingDirection'] for bold in bold_files]
     return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
-
-def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
-    """Builds a regressor set comprisong motion parameters, composite norm and
-    outliers
-    The outliers are added as a single time point column for each outlier
-    Parameters
-    ----------
-    motion_params: a text file containing motion parameters and its derivatives
-    comp_norm: a text file containing the composite norm
-    outliers: a text file containing 0-based outlier indices
-    detrend_poly: number of polynomials to add to detrend
-    Returns
-    -------
-    components_file: a text file containing all the regressors
-    """
-    out_files = []
-    for idx, filename in enumerate(filename_to_list(motion_params)):
-        params = np.genfromtxt(filename)
-        norm_val = np.genfromtxt(filename_to_list(comp_norm)[idx])
-        out_params = np.hstack((params, norm_val[:, None]))
-        try:
-            outlier_val = np.genfromtxt(filename_to_list(outliers)[idx])
-        except IOError:
-            outlier_val = np.empty((0))
-        for index in np.atleast_1d(outlier_val):
-            outlier_vector = np.zeros((out_params.shape[0], 1))
-            outlier_vector[index] = 1
-            out_params = np.hstack((out_params, outlier_vector))
-        if detrend_poly:
-            timepoints = out_params.shape[0]
-            X = np.empty((timepoints, 0))
-            for i in range(detrend_poly):
-                X = np.hstack((X, legendre(
-                    i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
-            out_params = np.hstack((out_params, X))
-        filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
-        np.savetxt(filename, out_params, fmt=str("%.10f"))
-        out_files.append(filename)
-    return out_files
-
-def bandpass_filter(files, lowpass_freq, highpass_freq, fs):
-    """Bandpass filter the input files
-    Parameters
-    ----------
-    files: list of 4d nifti files
-    lowpass_freq: cutoff frequency for the low pass filter (in Hz)
-    highpass_freq: cutoff frequency for the high pass filter (in Hz)
-    fs: sampling rate (in Hz)
-    """
-    out_files = []
-    for filename in filename_to_list(files):
-        path, name, ext = split_filename(filename)
-        out_file = os.path.join(os.getcwd(), name + '_bp' + ext)
-        img = nb.load(filename)
-        timepoints = img.shape[-1]
-        F = np.zeros((timepoints))
-        lowidx = int(timepoints / 2) + 1
-        if lowpass_freq > 0:
-            lowidx = np.round(float(lowpass_freq) / fs * timepoints)
-        highidx = 0
-        if highpass_freq > 0:
-            highidx = np.round(float(highpass_freq) / fs * timepoints)
-        F[highidx:lowidx] = 1
-        F = ((F + F[::-1]) > 0).astype(int)
-        data = img.get_data()
-        if np.all(F == 1):
-            filtered_data = data
-        else:
-            filtered_data = np.real(np.fft.ifftn(np.fft.fftn(data) * F))
-        img_out = nb.Nifti1Image(filtered_data, img.affine, img.header)
-        img_out.to_filename(out_file)
-        out_files.append(out_file)
-    return list_to_filename(out_files)
-
-def extract_noise_components(realigned_file, mask_file, num_components=5,
-                             extra_regressors=None):
-    """Derive components most reflective of physiological noise
-    Parameters
-    ----------
-    realigned_file: a 4D Nifti file containing realigned volumes
-    mask_file: a 3D Nifti file containing white matter + ventricular masks
-    num_components: number of components to use for noise decomposition
-    extra_regressors: additional regressors to add
-    Returns
-    -------
-    components_file: a text file containing the noise components
-    """
-    imgseries = nb.load(realigned_file)
-    components = None
-    for filename in filename_to_list(mask_file):
-        mask = nb.load(filename).get_data()
-        if len(np.nonzero(mask > 0)[0]) == 0:
-            continue
-        voxel_timecourses = imgseries.get_data()[mask > 0]
-        voxel_timecourses[np.isnan(np.sum(voxel_timecourses, axis=1)), :] = 0
-        # remove mean and normalize by variance
-        # voxel_timecourses.shape == [nvoxels, time]
-        X = voxel_timecourses.T
-        stdX = np.std(X, axis=0)
-        stdX[stdX == 0] = 1.
-        stdX[np.isnan(stdX)] = 1.
-        stdX[np.isinf(stdX)] = 1.
-        X = (X - np.mean(X, axis=0)) / stdX
-        u, _, _ = sp.linalg.svd(X, full_matrices=False)
-        if components is None:
-            components = u[:, :num_components]
-        else:
-            components = np.hstack((components, u[:, :num_components]))
-    if extra_regressors:
-        regressors = np.genfromtxt(extra_regressors)
-        components = np.hstack((components, regressors))
-    components_file = os.path.join(os.getcwd(), 'noise_components.txt')
-    np.savetxt(components_file, components, fmt=str("%.10f"))
-    return components_file
 
 def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     if not os.path.exists(workdir):
@@ -1023,16 +879,6 @@ def analyze_bids_dataset(bold_files,
                       name='infosource')
         infosource.iterables = ('bold', bold_files)
 
-    """
-    realign each functional run
-
-    Outputs:
-
-    out_file: (a list of items which are an existing file name)
-        Realigned files (per run)
-    par_file: (a list of items which are an existing file name)
-        Motion parameter files. Angles are not euler angles
-    """
     # if no slice_times, SpatialRealign algorithm used
     realign_run = Node(nipy.SpaceTimeRealigner(), 
                        name='realign_per_run')
@@ -1048,7 +894,31 @@ def analyze_bids_dataset(bold_files,
     tsnr.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=16G -c 4'}
 
-    # Compute the median image across runs (now MapNode)
+    def median(in_files):
+        """Computes an average of the median of each realigned timeseries
+        Parameters
+        ----------
+        in_files: one or more realigned Nifti 4D time series
+
+        Returns
+        -------
+        out_file: a 3D Nifti file
+        """
+        average = None
+        for idx, filename in enumerate(filename_to_list(in_files)):
+            img = nb.load(filename)
+            data = np.median(img.get_data(), axis=3)
+            if average is None:
+                average = data
+            else:
+                average = average + data
+        median_img = nb.Nifti1Image(average/float(idx + 1),
+                                    img.get_affine(), img.get_header())
+        filename = os.path.join(os.getcwd(), 'median.nii.gz')
+        median_img.to_filename(filename)
+        return filename
+
+    # Compute the median image across runs
     calc_median = Node(Function(input_names=['in_files'],
                                 output_names=['median_file'],
                                 function=median, imports=imports),
@@ -1155,13 +1025,61 @@ def analyze_bids_dataset(bold_files,
                 (joiner, art, [('nipy_realign_pars', 'realignment_parameters')])
                 ])
 
-    def selectindex(files, idx):
-        """ Utility function for registration seg files """
-        import numpy as np
-        from nipype.utils.filemanip import filename_to_list, list_to_filename
-        return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
+    def bandpass_filter(files, lowpass_freq, highpass_freq, fs):
+        """Bandpass filter the input files
+        Parameters
+        ----------
+        files: list of 4d nifti files
+        lowpass_freq: cutoff frequency for the low pass filter (in Hz)
+        highpass_freq: cutoff frequency for the high pass filter (in Hz)
+        fs: sampling rate (in Hz)
+        """
+        out_files = []
+        for filename in filename_to_list(files):
+            path, name, ext = split_filename(filename)
+            out_file = os.path.join(os.getcwd(), name + '_bp' + ext)
+            img = nb.load(filename)
+            timepoints = img.shape[-1]
+            F = np.zeros((timepoints))
+            lowidx = int(timepoints / 2) + 1
+            if lowpass_freq > 0:
+                lowidx = np.round(float(lowpass_freq) / fs * timepoints)
+            highidx = 0
+            if highpass_freq > 0:
+                highidx = np.round(float(highpass_freq) / fs * timepoints)
+            F[highidx:lowidx] = 1
+            F = ((F + F[::-1]) > 0).astype(int)
+            data = img.get_data()
+            if np.all(F == 1):
+                filtered_data = data
+            else:
+                filtered_data = np.real(np.fft.ifftn(np.fft.fftn(data) * F))
+            img_out = nb.Nifti1Image(filtered_data, img.affine, img.header)
+            img_out.to_filename(out_file)
+            out_files.append(out_file)
+        return list_to_filename(out_files)
+    
+    # Bandpass filters before registration
+    bandpass = Node(Function(input_names=['files', 'lowpass_freq',
+                                          'highpass_freq', 'fs'],
+                             output_names=['out_files'],
+                             function=bandpass_filter,
+                             imports=imports),
+                    name='bandpass_unsmooth')
+    bandpass.inputs.fs = 1. / TR
+    bandpass.inputs.highpass_freq = highpass_freq
+    bandpass.inputs.lowpass_freq = lowpass_freq
+    wf.connect(realign_all, 'out_file', bandpass, 'files')
 
-    # could run into problem with mapnode with filesaving
+    """Smooth the functional data using
+    :class:`nipype.interfaces.fsl.IsotropicSmooth`.
+    """
+    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
+    smooth.inputs.fwhm = fwhm
+    wf.connect(bandpass, 'out_files', smooth, 'in_file')
+    # once highpassed and smoothed, pass into modelfit
+    wf.connect(smooth, 'out_file', modelfit, 'inputspec.functional_data')
+
     def motion_regressors(motion_params, order=0, derivatives=1):
         """Compute motion regressors upto given order and derivative
         motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)"""
@@ -1180,7 +1098,7 @@ def analyze_bids_dataset(bold_files,
             np.savetxt(filename, out_params2, fmt=str("%.10f"))
             out_files.append(filename)
         return out_files
-
+    
     
     motreg = Node(Function(input_names=['motion_params', 'order',
                                         'derivatives'],
@@ -1190,13 +1108,52 @@ def analyze_bids_dataset(bold_files,
                   name='getmotionregress')
     wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
     
+    
+    def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
+        """Builds a regressor set comprisong motion parameters, composite norm and
+        outliers
+        The outliers are added as a single time point column for each outlier
+        Parameters
+        ----------
+        motion_params: a text file containing motion parameters and its derivatives
+        comp_norm: a text file containing the composite norm
+        outliers: a text file containing 0-based outlier indices
+        detrend_poly: number of polynomials to add to detrend
+        Returns
+        -------
+        components_file: a text file containing all the regressors
+        """
+        out_files = []
+        for idx, filename in enumerate(filename_to_list(motion_params)):
+            params = np.genfromtxt(filename)
+            norm_val = np.genfromtxt(filename_to_list(comp_norm)[idx])
+            out_params = np.hstack((params, norm_val[:, None]))
+            try:
+                outlier_val = np.genfromtxt(filename_to_list(outliers)[idx])
+            except IOError:
+                outlier_val = np.empty((0))
+            for index in np.atleast_1d(outlier_val):
+                outlier_vector = np.zeros((out_params.shape[0], 1))
+                outlier_vector[index] = 1
+                out_params = np.hstack((out_params, outlier_vector))
+            if detrend_poly:
+                timepoints = out_params.shape[0]
+                X = np.empty((timepoints, 0))
+                for i in range(detrend_poly):
+                    X = np.hstack((X, legendre(
+                        i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
+                out_params = np.hstack((out_params, X))
+            filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
+            np.savetxt(filename, out_params, fmt=str("%.10f"))
+            out_files.append(filename)
+        return out_files
+
     # Create a filter to remove motion and art confounds
     createfilter1 = Node(Function(input_names=['motion_params', 'comp_norm',
                                                'outliers', 'detrend_poly'],
                                   output_names=['out_files'],
                                   function=build_filter1,
                                   imports=imports),
-                            #iterfield=['motion_params'],
                             name='makemotionbasedfilter')
     createfilter1.inputs.detrend_poly = 2
     wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
@@ -1212,6 +1169,54 @@ def analyze_bids_dataset(bold_files,
     wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
                filter1, 'out_res_name')
     wf.connect(createfilter1, 'out_files', filter1, 'design')
+
+    def selectindex(files, idx):
+        """ Utility function for registration seg files """
+        import numpy as np
+        from nipype.utils.filemanip import filename_to_list, list_to_filename
+        return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
+
+        
+    def extract_noise_components(realigned_file, mask_file, num_components=5,
+                                 extra_regressors=None):
+        """Derive components most reflective of physiological noise
+        Parameters
+        ----------
+        realigned_file: a 4D Nifti file containing realigned volumes
+        mask_file: a 3D Nifti file containing white matter + ventricular masks
+        num_components: number of components to use for noise decomposition
+        extra_regressors: additional regressors to add
+        Returns
+        -------
+        components_file: a text file containing the noise components
+        """
+        imgseries = nb.load(realigned_file)
+        components = None
+        for filename in filename_to_list(mask_file):
+            mask = nb.load(filename).get_data()
+            if len(np.nonzero(mask > 0)[0]) == 0:
+                continue
+            voxel_timecourses = imgseries.get_data()[mask > 0]
+            voxel_timecourses[np.isnan(np.sum(voxel_timecourses, axis=1)), :] = 0
+            # remove mean and normalize by variance
+            # voxel_timecourses.shape == [nvoxels, time]
+            X = voxel_timecourses.T
+            stdX = np.std(X, axis=0)
+            stdX[stdX == 0] = 1.
+            stdX[np.isnan(stdX)] = 1.
+            stdX[np.isinf(stdX)] = 1.
+            X = (X - np.mean(X, axis=0)) / stdX
+            u, _, _ = sp.linalg.svd(X, full_matrices=False)
+            if components is None:
+                components = u[:, :num_components]
+            else:
+                components = np.hstack((components, u[:, :num_components]))
+        if extra_regressors:
+            regressors = np.genfromtxt(extra_regressors)
+            components = np.hstack((components, regressors))
+        components_file = os.path.join(os.getcwd(), 'noise_components.txt')
+        np.savetxt(components_file, components, fmt=str("%.10f"))
+        return components_file
 
     createfilter2 = MapNode(Function(input_names=['realigned_file',
                                                   'mask_file',
@@ -1238,29 +1243,16 @@ def analyze_bids_dataset(bold_files,
     wf.connect(createfilter2, 'out_files', filter2, 'design')
     wf.connect(mask, 'mask_file', filter2, 'mask')
 
-    bandpass = Node(Function(input_names=['files', 'lowpass_freq',
-                                          'highpass_freq', 'fs'],
-                             output_names=['out_files'],
-                             function=bandpass_filter,
-                             imports=imports),
-                    name='bandpass_unsmooth')
-    bandpass.inputs.fs = 1. / TR
-    bandpass.inputs.highpass_freq = highpass_freq
-    bandpass.inputs.lowpass_freq = lowpass_freq
-    wf.connect(filter2, 'out_res', bandpass, 'files')
-
-    """Smooth the functional data using
-    :class:`nipype.interfaces.fsl.IsotropicSmooth`.
-    """
-
-    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
-    smooth.inputs.fwhm = fwhm
-
-    wf.connect(bandpass, 'out_files', smooth, 'in_file')
+    # Do it again to check
+    bandpass2 = bandpass.clone(name='bp2_unsmooth')
+    wf.connect(filter2, 'out_res', bandpass2, 'files')
+    # Do again for check
+    smooth2 = smooth.clone(name="smooth2")
+    wf.connect(bandpass2, 'out_files', smooth2, 'in_file')
 
     collector = Node(Merge(2), name='collect_streams')
-    wf.connect(smooth, 'out_file', collector, 'in1')
-    wf.connect(bandpass, 'out_files', collector, 'in2')
+    wf.connect(smooth2, 'out_file', collector, 'in1')
+    wf.connect(bandpass2, 'out_files', collector, 'in2')
 
     """
     Transform the remaining images. First to anatomical and then to target
@@ -1351,10 +1343,10 @@ def analyze_bids_dataset(bold_files,
     wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
     wf.connect(realign_all, 'out_file', modelspec, 'functional_runs')
     wf.connect(joiner, 'nipy_realign_pars', modelspec, 'realignment_parameters')
-    # might have problem with mapnode
     wf.connect(art, 'outlier_files', modelspec, 'outlier_files')
     wf.connect(modelspec, 'session_info', modelfit, 'inputspec.session_info')
-    wf.connect(realign_all, 'out_file', modelfit, 'inputspec.functional_data')
+    # OLD METHOD
+    #wf.connect(realign_all, 'out_file', modelfit, 'inputspec.functional_data')
 
     def sort_copes(copes, varcopes, contrasts):
         """Reorder the copes so that now it combines across runs"""
