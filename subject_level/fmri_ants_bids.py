@@ -1059,6 +1059,37 @@ def analyze_bids_dataset(bold_files,
             out_files.append(out_file)
         return list_to_filename(out_files)
     
+    ## some more preproc on funcs for bold analysis
+    # apply mask to funcs
+    maskfunc = MapNode(interface=fsl.ImageMaths(suffix='_bet',
+                                                op_string='-mas'),
+                       iterfield=['in_file'],
+                       name='maskfunc')
+    wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
+    wf.connect(mask, 'mask_file', maskfunc, 'in_file2')
+    
+    # find median value of run (NOTE: different medians if no topup)
+    medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
+                        iterfield=['in_file'],
+                        name='medianval')
+    wf.connect(realign_all, 'out_file', medianval, 'in_file')
+    wf.connect(mask, 'out_file', medianval, 'mask_file')
+
+    # smooth func files
+    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
+    smooth.inputs.fwhm = fwhm
+    wf.connect(maskfunc, 'out_file', smooth, 'in_file')
+
+    def getmeanscale(medianvals):
+        """ scale is set to 10000 """
+        return [str('-mul %.10f'%(10000. / val)) for val in medianvals]
+    # scale the median value of the run
+    meanscale = MapNode(interface=fsl.ImageMaths(suffix='_gms'),
+                        iterfield=['in_file', 'op_string'],
+                        name='meanscale')
+    wf.connect(smooth, 'out_file', meanscale, 'in_file')
+    wf.connect(medianval, ('out_stat', getmeanscale), meanscale, 'op_string')
+     
     # Bandpass filters before registration
     bandpass = Node(Function(input_names=['files', 'lowpass_freq',
                                           'highpass_freq', 'fs'],
@@ -1069,16 +1100,22 @@ def analyze_bids_dataset(bold_files,
     bandpass.inputs.fs = 1. / TR
     bandpass.inputs.highpass_freq = highpass_freq
     bandpass.inputs.lowpass_freq = lowpass_freq
-    wf.connect(realign_all, 'out_file', bandpass, 'files')
+    wf.connect(meanscale, 'out_file', bandpass, 'files')
 
-    """Smooth the functional data using
-    :class:`nipype.interfaces.fsl.IsotropicSmooth`.
-    """
-    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
-    smooth.inputs.fwhm = fwhm
-    wf.connect(bandpass, 'out_files', smooth, 'in_file')
-    # once highpassed and smoothed, pass into modelfit
-    wf.connect(smooth, 'out_file', modelfit, 'inputspec.functional_data')
+    #Add back the mean removed by the highpass filter operation as of FSL 5.0.7
+    meanfunc4 = MapNode(interface=fsl.ImageMaths(op_string='-Tmean',
+                                                 suffix='_mean'),
+                        iterfield=['in_file'],
+                        name='meanfunc4')
+    wf.connect(meanscale, 'out_file', meanfunc4, 'in_file')
+    
+    addmean = MapNode(interface=fsl.BinaryMaths(operation='add'),
+                      iterfield=['in_file', 'operand_file'],
+                      name='addmean')
+    wf.connect(bandpass, 'out_files', addmean, 'in_file')
+    wf.connect(meanfunc4, 'out_file', addmean, 'operand_file')
+    # once mean is added back - pass in to registration
+    wf.connect(addmean, 'out_file', modelfit, 'inputspec.functional_data')
 
     def motion_regressors(motion_params, order=0, derivatives=1):
         """Compute motion regressors upto given order and derivative
