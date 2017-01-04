@@ -13,7 +13,7 @@ This script demonstrates how to use nipype to analyze a BIDS data set::
 """
 
 from nipype import config
-#config.enable_provenance()
+config.enable_provenance()
 
 import six
 
@@ -744,8 +744,8 @@ def get_topup_info(layout, bold_files):
             readout_topup = layout.get_metadata(fmap)['TotalReadoutTime']
     # metainfo (all the same)
     orig_info = layout.get_metadata(bold_files[0])
-    num_slices, readout = orig_info['dcmmeta_shape'][3], \
-    (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
+    num_slices, readout = (orig_info['dcmmeta_shape'][2], 
+                (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
     # keep track of directions
     pe_key = [layout.get_metadata(bold)['PhaseEncodingDirection'] for bold in bold_files]
     return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
@@ -779,14 +779,18 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             print('task-{} is not found in your dataset'.format(task_id))
             return
 
+        if not resting-state:
+        # remove lowpass filter if doing task analysis
+            args.lpfilter = -1
+
         run_id, conds, TR, slice_times = get_subjectinfo(subj_label, bids_dir, 
                                                          task_id, args.model)
         # replacing datasource
-        bold_files = sorted([f.filename for f in \
+        bold_files = sorted([f.filename for f in 
                       layout.get(subject = subj_label.replace('sub-',''),
                       type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
 
-        anat = [f.filename for f in \
+        anat = [f.filename for f in 
                 layout.get(subject = subj_label.replace('sub-',''),
                 type='T1w', extensions=['nii.gz', 'nii'])][0]
 
@@ -815,14 +819,15 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
-                      outdir=os.path.join(outdir, subj_label),
+                      do_rs=args.resting-state,
+                      outdir=os.path.join(outdir, subj_label, 
+                                          'task-{}'.format(task_id)),
                       name=name)
         # add flag for topup
         if args.topup:
-            num_slices, pe_key, readout, \
-            topup_AP, topup_PA, readout_topup = get_topup_info(layout, #run_id,
-                                                               bold_files)
-
+            (num_slices, pe_key, readout, 
+            topup_AP, topup_PA, readout_topup) = get_topup_info(layout,
+                                                                bold_files)
             topup_kwargs = dict(num_slices=num_slices,
                                 pe_key=pe_key,
                                 readout=readout,
@@ -858,7 +863,8 @@ def analyze_bids_dataset(bold_files,
                          readout=None,
                          topup_AP=None,
                          topup_PA=None,
-                         readout_topup=None, 
+                         readout_topup=None,
+                         do_rs=False, 
                          outdir=None, 
                          name='tfmri'):
     
@@ -888,11 +894,6 @@ def analyze_bids_dataset(bold_files,
         realign_run.inputs.tr = TR
     realign_run.plugin_args = {'sbatch_args': '-c 4'}
     wf.connect(infosource, 'bold', realign_run, 'in_file')
-
-    # Comute TSNR on realigned data regressing polynomials upto order 2
-    tsnr = Node(TSNR(regress_poly=2), name='tsnr')
-    tsnr.plugin_args = {'qsub_args': '-pe orte 4',
-                       'sbatch_args': '--mem=16G -c 4'}
 
     def median(in_files):
         """Computes an average of the median of each realigned timeseries
@@ -924,9 +925,6 @@ def analyze_bids_dataset(bold_files,
                                 function=median, imports=imports),
                           name='median')
     
-    # regardless of topup makes workflow easier to connect
-    recalc_median = calc_median.clone(name='recalc_median')
-
     if topup_AP:
         topup = create_topup_workflow(num_slices, readout, 
                                       readout_topup, name='topup')
@@ -976,6 +974,15 @@ def analyze_bids_dataset(bold_files,
 
     #realign across runs
     realign_all = realign_run.clone(name='realign_allruns')
+
+    # Comute TSNR on realigned data regressing polynomials upto order 2
+    tsnr = MapNode(TSNR(regress_poly=2), iterfield=['in_file'], name='tsnr')
+    tsnr.plugin_args = {'qsub_args': '-pe orte 4',
+                       'sbatch_args': '--mem=16G -c 4'}
+
+    # regardless of topup makes workflow easier to connect
+    recalc_median = calc_median.clone(name='recalc_median')
+
 
     wf.connect(joiner, 'corrected_bolds', realign_all, 'in_file')
     wf.connect(realign_all, 'out_file', tsnr, 'in_file')
@@ -1514,6 +1521,7 @@ def analyze_bids_dataset(bold_files,
             subs.append(('__modelgen%d/' % i, '/run%02d_' % run_num))
 
         subs.append(('/%s/%s/' % (task_id, subject_id), '/task-%s/' % task_id))
+        subs.append(('/%s/' % task_id, '/task-%s/' % task_id))
         subs.append(('/model%03d/task-%s_' % (model_id, task_id), '/'))
         subs.append(('_bold_dtype_mcf_bet_thresh_dil', '_mask'))
         subs.append(('mask/model%03d/task-%s/' % (model_id, task_id), 'mask/'))
@@ -1604,14 +1612,13 @@ if __name__ == '__main__':
                         help="Subject name (e.g. 'sub001')")
     parser.add_argument('-m', '--model', default=1, type=int,
                         help="Model index" + defstr)
-    parser.add_argument('-x', '--subjectprefix', default='sub*',
-                        help="Subject prefix" + defstr)
-    parser.add_argument('-t', '--task', required=True, #nargs='+',
+    parser.add_argument('-t', '--task', required=True,
                         type=str, help="Task name" + defstr)
     parser.add_argument('--hpfilter', default=0.01, type=float, 
                         help="High pass frequency (Hz)" + defstr)
     parser.add_argument('--lpfilter', default=0.1, type=float,
-                        help="Low pass frequency (Hz)" + defstr)
+                        help=("Low pass frequency (Hz) - removed for 
+                             task analysis" + defstr))
     parser.add_argument('--fwhm', default=6.,
                         type=float, help="Spatial FWHM" + defstr)
     parser.add_argument('--derivatives', action="store_true",
@@ -1631,14 +1638,17 @@ if __name__ == '__main__':
                         help=("Target in MNI space. Best to use the MindBoggle "
                               "template - only used with FreeSurfer"
                               "OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz"))
-    parser.add_argument("--session_id", dest="session_id", default=None,
-                        help="Session id, ex. 'ses-1'")
+    parser.add_argument("-ss", dest="session_id", default=None,
+                        help="Session id, ex. pre, 2, etc.")
     parser.add_argument("--crashdump_dir", dest="crashdump_dir",
                         help="Crashdump dir", default=None)
+    parser.add_argument("-resting", dest="resting-state", action="store_true",
+                        help="Process resting state functionals")
     parser.add_argument('--topup', action="store_true",
                         help="Apply topup correction" + defstr)
     parser.add_argument('--debug', action="store_true",
                         help="Activate nipype debug mode" + defstr)
+    parser.add_argument(
     args = parser.parse_args()
     
     data_dir = os.path.abspath(args.datasetdir)
