@@ -745,7 +745,7 @@ def get_topup_info(layout, bold_files):
     # metainfo (all the same)
     orig_info = layout.get_metadata(bold_files[0])
     num_slices, readout = (orig_info['dcmmeta_shape'][2], 
-                (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing']
+                (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing'])
     # keep track of directions
     pe_key = [layout.get_metadata(bold)['PhaseEncodingDirection'] for bold in bold_files]
     return num_slices, pe_key, readout, topup_AP, topup_PA, readout_topup
@@ -820,8 +820,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       contrast=contrast_file,
                       use_derivatives=derivatives,
                       do_rs=args.resting-state,
-                      outdir=os.path.join(outdir, subj_label, 
-                                          'task-{}'.format(task_id)),
+                      outdir=os.path.join(outdir, 'task-{}'.format(task_id)), 
                       name=name)
         # add flag for topup
         if args.topup:
@@ -1520,7 +1519,6 @@ def analyze_bids_dataset(bold_files,
             subs.append(('__realign%d/' % i, '/run%02d_' % run_num))
             subs.append(('__modelgen%d/' % i, '/run%02d_' % run_num))
 
-        subs.append(('/%s/%s/' % (task_id, subject_id), '/task-%s/' % task_id))
         subs.append(('/%s/' % task_id, '/task-%s/' % task_id))
         subs.append(('/model%03d/task-%s_' % (model_id, task_id), '/'))
         subs.append(('_bold_dtype_mcf_bet_thresh_dil', '_mask'))
@@ -1617,8 +1615,8 @@ if __name__ == '__main__':
     parser.add_argument('--hpfilter', default=0.01, type=float, 
                         help="High pass frequency (Hz)" + defstr)
     parser.add_argument('--lpfilter', default=0.1, type=float,
-                        help=("Low pass frequency (Hz) - removed for 
-                             task analysis" + defstr))
+                        help=("Low pass frequency (Hz) - removed for" 
+                             " task analysis" + defstr))
     parser.add_argument('--fwhm', default=6.,
                         type=float, help="Spatial FWHM" + defstr)
     parser.add_argument('--derivatives', action="store_true",
@@ -1648,7 +1646,7 @@ if __name__ == '__main__':
                         help="Apply topup correction" + defstr)
     parser.add_argument('--debug', action="store_true",
                         help="Activate nipype debug mode" + defstr)
-    parser.add_argument(
+
     args = parser.parse_args()
     
     data_dir = os.path.abspath(args.datasetdir)
