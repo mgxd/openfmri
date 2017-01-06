@@ -212,7 +212,7 @@ def create_reg_workflow(name='registration'):
     Concatenate the affine and ants transforms into a list
     """
 
-    pickfirst = lambda x: x[0]
+    pickfirst = lambda x: x[0] if isinstance(x, (list, tuple)) else x
 
     merge = Node(Merge(2), iterfield=['in2'], name='mergexfm')
     register.connect(convert2itk, 'itk_transform', merge, 'in2')
@@ -779,7 +779,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             print('task-{} is not found in your dataset'.format(task_id))
             return
 
-        if not resting-state:
+        if not args.resting:
         # remove lowpass filter if doing task analysis
             args.lpfilter = -1
 
@@ -796,7 +796,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
         #use events.tsv eventually
         behav = [x for x in glob(
-                 os.path.join(old_model_dir, 'test_onsets', subj_label,
+                 os.path.join(old_model_dir, 'onsets', subj_label,
                          'task-{}*'.format(task_id), 'cond*.txt'))]
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
@@ -819,7 +819,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fwhm=args.fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
-                      do_rs=args.resting-state,
+                      do_rs=args.resting,
                       outdir=os.path.join(outdir, 'task-{}'.format(task_id)), 
                       name=name)
         # add flag for topup
@@ -1412,7 +1412,7 @@ def analyze_bids_dataset(bold_files,
                                 function=sort_copes),
                        name='cope_sorter')
 
-    pickfirst = lambda x: x[0]
+    pickfirst = lambda x: x[0] if isinstance(x, (list, tuple)) else x
 
     wf.connect(contrastgen, 'contrasts', cope_sorter, 'contrasts')
     wf.connect([(mask, fixed_fx, [('mask_file', 'flameo.mask_file')]),
@@ -1640,7 +1640,7 @@ if __name__ == '__main__':
                         help="Session id, ex. pre, 2, etc.")
     parser.add_argument("--crashdump_dir", dest="crashdump_dir",
                         help="Crashdump dir", default=None)
-    parser.add_argument("-resting", dest="resting-state", action="store_true",
+    parser.add_argument("-rs", dest="resting", action="store_true",
                         help="Process resting state functionals")
     parser.add_argument('--topup', action="store_true",
                         help="Apply topup correction" + defstr)
