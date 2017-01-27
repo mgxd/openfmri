@@ -10,6 +10,10 @@ A growing number of datasets are available on `OpenfMRI <http://openfmri.org>`_.
 This script demonstrates how to use nipype to analyze a BIDS data set::
 
     python fmri_ants_bids.py /path/to/bids/dir
+
+RESTING-STATE REQ:
+- `Joint Fusion Atlas <http://mindboggle.info/data/atlases/jointfusion/OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_2mm_v2.nii.gz>`_
+- `MNI template <http://mindboggle.info/data/templates/ants/OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz>`_
 """
 
 from nipype import config
@@ -815,6 +819,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       behav=behav,
                       fs_dir=fs_dir,
                       conds=conds,
+                      comp_cor=args.cc,
                       run_id=run_id,
                       highpass_freq=args.hpfilter,
                       lowpass_freq=args.lpfilter,
@@ -852,6 +857,7 @@ def analyze_bids_dataset(bold_files,
                          target_file=None, 
                          fs_dir=None, 
                          conds=None,
+                         comp_cor=False,
                          run_id=None,
                          highpass_freq=0.01,
                          lowpass_freq=0.1, 
@@ -998,11 +1004,6 @@ def analyze_bids_dataset(bold_files,
     wf.connect(tsnr, 'tsnr_file', get_roi_tsnr, 'in_file')
     wf.connect(registration, 'outputspec.aparc', get_roi_tsnr, 'segmentation_file')
 
-    # Get a brain mask (use registration's mean2anat_mask)
-    #mask = Node(fsl.BET(), name='mask-bet')
-    #mask.inputs.mask = True
-    #wf.connect(recalc_median, 'median_file', mask, 'in_file')
-
     """ Detect outliers in a functional imaging series"""
     art = MapNode(ra.ArtifactDetect(),
                   iterfield=['realigned_files', 
@@ -1052,69 +1053,70 @@ def analyze_bids_dataset(bold_files,
             out_files.append(out_file)
         return list_to_filename(out_files)
     
-    ## some more preproc on funcs for bold analysis
-    # apply mask to funcs
-    maskfunc = MapNode(interface=fsl.ImageMaths(suffix='_bet',
-                                                op_string='-mas'),
-                       iterfield=['in_file'],
-                       name='maskfunc')
-    wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
-    wf.connect(registration, 'outputspec.mean2anat_mask', maskfunc, 'in_file2')
-    
-    # find median value of run (NOTE: different medians if no topup)
-    medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
-                        iterfield=['in_file'],
-                        name='medianval')
-    wf.connect(realign_all, 'out_file', medianval, 'in_file')
-    wf.connect(maskfunc, 'out_file', medianval, 'mask_file')
-
-    # smooth func files
-    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
-    smooth.inputs.fwhm = fwhm
-    wf.connect(maskfunc, 'out_file', smooth, 'in_file')
-
-    def getmeanscale(medianvals):
-        """ scale is set to 10000 """
-        return [str('-mul %.10f'%(10000. / val)) for val in medianvals]
-    # scale the median value of the run
-    meanscale = MapNode(interface=fsl.ImageMaths(suffix='_gms'),
-                        iterfield=['in_file', 'op_string'],
-                        name='meanscale')
-    wf.connect(smooth, 'out_file', meanscale, 'in_file')
-    wf.connect(medianval, ('out_stat', getmeanscale), meanscale, 'op_string')
-    
-    # Bandpass filters before registration
-    bandpass = Node(Function(input_names=['files', 'lowpass_freq',
-                                          'highpass_freq', 'fs'],
-                             output_names=['out_files'],
-                             function=bandpass_filter,
-                             imports=imports),
-                    name='bandpass_unsmooth')
-    bandpass.inputs.fs = 1. / TR
-    bandpass.inputs.highpass_freq = highpass_freq
-    bandpass.inputs.lowpass_freq = lowpass_freq
-    wf.connect(meanscale, 'out_file', bandpass, 'files')
-
-    if version > 507:
-        #Add back the mean removed by the highpass filter operation as of FSL 5.0.7
-        meanfunc4 = MapNode(interface=fsl.ImageMaths(op_string='-Tmean',
-                                                     suffix='_mean'),
+    if behav:
+        ## some more preproc on funcs for bold analysis
+        # apply mask to funcs
+        maskfunc = MapNode(interface=fsl.ImageMaths(suffix='_bet',
+                                                    op_string='-mas'),
+                           iterfield=['in_file'],
+                           name='maskfunc')
+        wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
+        wf.connect(registration, 'outputspec.mean2anat_mask', maskfunc, 'in_file2')
+        
+        # find median value of run (NOTE: different medians if no topup)
+        medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
                             iterfield=['in_file'],
-                         name='meanfunc4')
-        wf.connect(meanscale, 'out_file', meanfunc4, 'in_file')
-    
-        addmean = MapNode(interface=fsl.BinaryMaths(operation='add'),
-                          iterfield=['in_file', 'operand_file'],
-                          name='addmean')
-        wf.connect(bandpass, 'out_files', addmean, 'in_file')
-        wf.connect(meanfunc4, 'out_file', addmean, 'operand_file')
-        # once mean is added back - pass in to modelfit
-        wf.connect(addmean, 'out_file', modelfit, 'inputspec.functional_data')
-    else: # older FSL doesn't remove mean
-        wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
-    modelfit.inputs.inputspec.bases = {'dgamma': {'derivs': use_derivatives}}
-    modelfit.inputs.inputspec.model_serial_correlations = True
-    modelfit.inputs.inputspec.film_threshold = 1000
+                            name='medianval')
+        wf.connect(realign_all, 'out_file', medianval, 'in_file')
+        wf.connect(maskfunc, 'out_file', medianval, 'mask_file')
+
+        # smooth func files
+        smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
+        smooth.inputs.fwhm = fwhm
+        wf.connect(maskfunc, 'out_file', smooth, 'in_file')
+
+        def getmeanscale(medianvals):
+            """ scale is set to 10000 """
+            return [str('-mul %.10f'%(10000. / val)) for val in medianvals]
+        # scale the median value of the run
+        meanscale = MapNode(interface=fsl.ImageMaths(suffix='_gms'),
+                            iterfield=['in_file', 'op_string'],
+                            name='meanscale')
+        wf.connect(smooth, 'out_file', meanscale, 'in_file')
+        wf.connect(medianval, ('out_stat', getmeanscale), meanscale, 'op_string')
+        
+        # Bandpass filters before registration
+        bandpass = Node(Function(input_names=['files', 'lowpass_freq',
+                                              'highpass_freq', 'fs'],
+                                 output_names=['out_files'],
+                                 function=bandpass_filter,
+                                 imports=imports),
+                        name='bandpass_unsmooth')
+        bandpass.inputs.fs = 1. / TR
+        bandpass.inputs.highpass_freq = highpass_freq
+        bandpass.inputs.lowpass_freq = lowpass_freq
+        wf.connect(meanscale, 'out_file', bandpass, 'files')
+
+        if version > 507:
+            #Add back the mean removed by the highpass filter operation as of FSL 5.0.7
+            meanfunc4 = MapNode(interface=fsl.ImageMaths(op_string='-Tmean',
+                                                         suffix='_mean'),
+                                iterfield=['in_file'],
+                             name='meanfunc4')
+            wf.connect(meanscale, 'out_file', meanfunc4, 'in_file')
+        
+            addmean = MapNode(interface=fsl.BinaryMaths(operation='add'),
+                              iterfield=['in_file', 'operand_file'],
+                              name='addmean')
+            wf.connect(bandpass, 'out_files', addmean, 'in_file')
+            wf.connect(meanfunc4, 'out_file', addmean, 'operand_file')
+            # once mean is added back - pass in to modelfit
+            wf.connect(addmean, 'out_file', modelfit, 'inputspec.functional_data')
+        else: # older FSL doesn't remove mean
+            wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
+        modelfit.inputs.inputspec.bases = {'dgamma': {'derivs': use_derivatives}}
+        modelfit.inputs.inputspec.model_serial_correlations = True
+        modelfit.inputs.inputspec.film_threshold = 1000
 
 
     
@@ -1246,48 +1248,256 @@ def analyze_bids_dataset(bold_files,
     wf.connect(filter1, ('out_res', rename, '_cleaned'),
                filter2, 'out_res_name')
     wf.connect(compstack, 'components_file', filter2, 'design')
-    #wf.connect(mask, 'mask_file', filter2, 'mask')
     wf.connect(registration, 'outputspec.mean2anat_mask', filter2, 'mask')
 
+    # resting state
+    if not behav:
+        bandpass_rs = bandpass.clone(name='bp_rs')
+        wf.connect(filter2, 'out_res', smooth_rs, 'in_file')
 
-    bandpass_rs = bandpass.clone(name='bp_rs')
-    wf.connect(filter2, 'out_res', bandpass_rs, 'files')
+        smooth_rs = smooth.clone(name="smooth_rs")
+        wf.connect(smooth_rs, 'out_file', bandpass_rs, 'files')
 
-    smooth_rs = smooth.clone(name="smooth_rs")
-    wf.connect(bandpass2, 'out_files', smooth_rs, 'in_file')
+        collector = Node(Merge(2), name='collect_streams')
+        wf.connect(smooth_rs, 'out_file', collector, 'in1')
+        wf.connect(bandpass_rs, 'out_files', collector, 'in2')
 
-    collector = Node(Merge(2), name='collect_streams')
-    wf.connect(smooth_rs, 'out_file', collector, 'in1')
-    wf.connect(bandpass_rs, 'out_files', collector, 'in2')
+        """
+        Transform the remaining images. First to anatomical and then to target
+        """
+        warpall = MapNode(ants.ApplyTransforms(), iterfield=['input_image'],
+                          name='warpall')
+        warpall.inputs.input_image_type = 3
+        warpall.inputs.interpolation = 'Linear'
+        warpall.inputs.invert_transform_flags = [False, False]
+        warpall.inputs.terminal_output = 'file'
+        warpall.inputs.reference_image = target_file
+        warpall.inputs.args = '--float'
+        warpall.inputs.num_threads = 2
+        warpall.plugin_args = {'sbatch_args': '-c%d' % 2}
 
-    """
-    Transform the remaining images. First to anatomical and then to target
-    """
+        # transform to target
+        wf.connect(collector, 'out', warpall, 'input_image')
+        wf.connect(registration, 'outputspec.transforms', warpall, 'transforms')
 
-    warpall = MapNode(ants.ApplyTransforms(), iterfield=['input_image'],
-                      name='warpall')
-    warpall.inputs.input_image_type = 3
-    warpall.inputs.interpolation = 'Linear'
-    warpall.inputs.invert_transform_flags = [False, False]
-    warpall.inputs.terminal_output = 'file'
-    warpall.inputs.reference_image = target_file
-    warpall.inputs.args = '--float'
-    warpall.inputs.num_threads = 2
-    warpall.plugin_args = {'sbatch_args': '-c%d' % 2}
+        mask_target = Node(fsl.ImageMaths(op_string='-bin'), name='target_mask')
 
-    # transform to target
-    wf.connect(collector, 'out', warpall, 'input_image')
-    wf.connect(registration, 'outputspec.transforms', warpall, 'transforms')
+        wf.connect(registration, 'outputspec.anat2target', mask_target, 'in_file')
 
-    mask_target = Node(fsl.ImageMaths(op_string='-bin'), name='target_mask')
+        maskts = MapNode(fsl.ApplyMask(), iterfield=['in_file'], name='ts_masker')
+        wf.connect(warpall, 'output_image', maskts, 'in_file')
+        wf.connect(mask_target, 'out_file', maskts, 'mask_file')
 
-    wf.connect(registration, 'outputspec.anat2target', mask_target, 'in_file')
+            # Sample the average time series in aparc ROIs
+        sampleaparc = MapNode(freesurfer.SegStats(default_color_table=True),
+                              iterfield=['in_file', 'summary_file',
+                                         'avgwf_txt_file'],
+                              name='aparc_ts')
+        sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
+                                         range(49, 55) + [58] + range(1001, 1036) +
+                                         range(2001, 2036))
 
-    maskts = MapNode(fsl.ApplyMask(), iterfield=['in_file'], name='ts_masker')
-    wf.connect(warpall, 'output_image', maskts, 'in_file')
-    wf.connect(mask_target, 'out_file', maskts, 'mask_file')
+        wf.connect(registration, 'outputspec.aparc',
+                   sampleaparc, 'segmentation_file')
+        wf.connect(collector, 'out', sampleaparc, 'in_file')
 
-    if behav: # task modeling (sink + return wf)
+        def get_names(files, suffix):
+            """Generate appropriate names for output files
+            """
+            from nipype.utils.filemanip import (split_filename, filename_to_list,
+                                                list_to_filename)
+            import os
+            out_names = []
+            for filename in files:
+                path, name, _ = split_filename(filename)
+                out_names.append(os.path.join(path,name + suffix))
+            return list_to_filename(out_names)
+
+        wf.connect(collector, ('out', get_names, '_avgwf.txt'),
+                   sampleaparc, 'avgwf_txt_file')
+        wf.connect(collector, ('out', get_names, '_summary.stats'),
+                   sampleaparc, 'summary_file')
+
+        # Sample the time series onto the surface of the target surface. Performs
+        # sampling into left and right hemisphere
+        target = Node(IdentityInterface(fields=['target_subject']), name='target')
+        target.iterables = ('target_subject', filename_to_list(target_subject))
+
+        samplerlh = MapNode(fs.SampleToSurface(),
+                            iterfield=['source_file'],
+                            name='sampler_lh')
+        samplerlh.inputs.sampling_method = "average"
+        samplerlh.inputs.sampling_range = (0.1, 0.9, 0.1)
+        samplerlh.inputs.sampling_units = "frac"
+        samplerlh.inputs.interp_method = "trilinear"
+        samplerlh.inputs.smooth_surf = surf_fwhm
+        #samplerlh.inputs.cortex_mask = True
+        samplerlh.inputs.out_type = 'niigz'
+        samplerlh.inputs.subjects_dir = fs_dir
+
+        samplerrh = samplerlh.clone('sampler_rh')
+
+        samplerlh.inputs.hemi = 'lh'
+        wf.connect(collector, 'out', samplerlh, 'source_file')
+        wf.connect(registration, 'outputspec.out_reg_file', samplerlh, 'reg_file')
+        wf.connect(target, 'target_subject', samplerlh, 'target_subject')
+
+        samplerrh.set_input('hemi', 'rh')
+        wf.connect(collector, 'out', samplerrh, 'source_file')
+        wf.connect(registration, 'outputspec.out_reg_file', samplerrh, 'reg_file')
+        wf.connect(target, 'target_subject', samplerrh, 'target_subject')
+
+        def combine_hemi(left, right):
+            """Combine left and right hemisphere time series into a single text file"""
+            lh_data = nb.load(left).get_data()
+            rh_data = nb.load(right).get_data()
+
+            indices = np.vstack((1000000 + np.arange(0, lh_data.shape[0])[:, None],
+                                 2000000 + np.arange(0, rh_data.shape[0])[:, None]))
+            all_data = np.hstack((indices, np.vstack((lh_data.squeeze(),
+                                                      rh_data.squeeze()))))
+            filename = left.split('.')[1] + '_combined.txt'
+            np.savetxt(filename, all_data,
+                       fmt=str(','.join(['%d'] + ['%.10f'] * (all_data.shape[1] - 1))))
+            return os.path.abspath(filename)
+
+        # Combine left and right hemisphere to text file
+        combiner = MapNode(Function(input_names=['left', 'right'],
+                                    output_names=['out_file'],
+                                    function=combine_hemi,
+                                    imports=imports),
+                           iterfield=['left', 'right'],
+                           name="combiner")
+        wf.connect(samplerlh, 'out_file', combiner, 'left')
+        wf.connect(samplerrh, 'out_file', combiner, 'right')
+
+        def extract_subrois(timeseries_file, label_file, indices):
+            """Extract voxel time courses for each subcortical roi index
+            Parameters
+            ----------
+            timeseries_file: a 4D Nifti file
+            label_file: a 3D file containing rois in the same space/size of the 4D file
+            indices: a list of indices for ROIs to extract.
+            Returns
+            -------
+            out_file: a text file containing time courses for each voxel of each roi
+                The first four columns are: freesurfer index, i, j, k positions in the
+                label file
+            """
+            img = nb.load(timeseries_file)
+            data = img.get_data()
+            roiimg = nb.load(label_file)
+            rois = roiimg.get_data()
+            prefix = split_filename(timeseries_file)[1]
+            out_ts_file = os.path.join(os.getcwd(), '%s_subcortical_ts.txt' % prefix)
+            with open(out_ts_file, 'wt') as fp:
+                for fsindex in indices:
+                    ijk = np.nonzero(rois == fsindex)
+                    ts = data[ijk]
+                    for i0, row in enumerate(ts):
+                        fp.write('%d,%d,%d,%d,' % (fsindex, ijk[0][i0],
+                                                   ijk[1][i0], ijk[2][i0]) +
+                                 ','.join(['%.10f' % val for val in row]) + '\n')
+            return out_ts_file
+
+        # Sample the time series file for each subcortical roi
+        ts2txt = MapNode(Function(input_names=['timeseries_file', 'label_file',
+                                               'indices'],
+                                  output_names=['out_file'],
+                                  function=extract_subrois,
+                                  imports=imports),
+                         iterfield=['timeseries_file'],
+                         name='getsubcortts')
+        ts2txt.inputs.indices = [8] + range(10, 14) + [17, 18, 26, 47] +\
+                                range(49, 55) + [58]
+        ts2txt.inputs.label_file = \
+            os.path.abspath(('OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_'
+                             '2mm_v2.nii.gz'))
+        wf.connect(maskts, 'out_file', ts2txt, 'timeseries_file')
+
+
+######################
+# Sink and end resting
+######################
+        
+        substitutions = [('_target_subject_', ''),
+                         ('_filtermotart_cleaned_bp_trans_masked', ''),
+                         ('_filtermotart_cleaned_bp', ''),
+                         ]
+        substitutions += [("_smooth%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_ts_masker%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_getsubcortts%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_combiner%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_filtermotion%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_filter_noise_nosmooth%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_makecompcorfilter%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_get_aparc_tsnr%d/" % i, "run%d_" % (i + 1)) for i in range(11)[::-1]]
+
+        substitutions += [("T1_out_brain_pve_0_maths_warped", "compcor_csf"),
+                          ("T1_out_brain_pve_1_maths_warped", "compcor_gm"),
+                          ("T1_out_brain_pve_2_maths_warped", "compcor_wm"),
+                          ("output_warped_image_maths", "target_brain_mask"),
+                          ("median_brain_mask", "native_brain_mask"),
+                          ("corr_", "")]
+
+        regex_subs = [('_combiner.*/sar', '/smooth/'),
+                      ('_combiner.*/ar', '/unsmooth/'),
+                      ('_aparc_ts.*/sar', '/smooth/'),
+                      ('_aparc_ts.*/ar', '/unsmooth/'),
+                      ('_getsubcortts.*/sar', '/smooth/'),
+                      ('_getsubcortts.*/ar', '/unsmooth/'),
+                      ('series/sar', 'series/smooth/'),
+                      ('series/ar', 'series/unsmooth/'),
+                      ('_inverse_transform./', ''),
+                      ]
+        # Save the relevant data into an output directory
+        datasink = Node(interface=DataSink(), name="datasink")
+        datasink.inputs.base_directory = sink_directory
+        datasink.inputs.substitutions = substitutions
+        datasink.inputs.regexp_substitutions = regex_subs
+        wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
+        wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
+        wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
+        wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
+        wf.connect(registration, 'outputspec.segmentation_files', datasink, 'mask_files')
+        wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.ants')
+        wf.connect(registration, 'outputspec.mean2anat_mask', datasink, 'mask_files.@brainmask')
+        wf.connect(mask_target, 'out_file', datasink, 'mask_files.target')
+        wf.connect(filter1, 'out_f', datasink, 'qa.compmaps.@mc_F')
+        wf.connect(filter1, 'out_pf', datasink, 'qa.compmaps.@mc_pF')
+        wf.connect(filter2, 'out_f', datasink, 'qa.compmaps')
+        wf.connect(filter2, 'out_pf', datasink, 'qa.compmaps.@p')
+        wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
+        wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
+        wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
+                                              ('summary_file', 'qa.tsnr.@summary')])])
+
+        wf.connect(bandpass, 'out_files', datasink, 'timeseries.@bandpassed')
+        wf.connect(smooth, 'out_file', datasink, 'timeseries.@smoothed')
+        wf.connect(createfilter1, 'out_files',
+                   datasink, 'regress.@regressors')
+        wf.connect(compcor, 'components_file',
+                   datasink, 'regress.@compcorr')
+        wf.connect(maskts, 'out_file', datasink, 'timeseries.target')
+        wf.connect(sampleaparc, 'summary_file',
+                   datasink, 'parcellations.aparc')
+        wf.connect(sampleaparc, 'avgwf_txt_file',
+                   datasink, 'parcellations.aparc.@avgwf')
+        wf.connect(ts2txt, 'out_file',
+                   datasink, 'parcellations.grayo.@subcortical')
+
+        datasink2 = Node(interface=DataSink(), name="datasink2")
+        datasink2.inputs.base_directory = outdir
+        datasink2.inputs.substitutions = substitutions
+        datasink2.inputs.regexp_substitutions = regex_subs
+        wf.connect(combiner, 'out_file',
+                   datasink2, 'parcellations.grayo.@surface')
+        return wf
+
+###############
+# Task modeling
+###############
+    if behav: 
         def get_contrasts(contrast_file, task_id, conds):
             """ Setup a basic set of contrasts, a t-test per condition """
             import numpy as np
@@ -1443,116 +1653,113 @@ def analyze_bids_dataset(bold_files,
             wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
             wf.connect(realign_all, 'out_file', sampleaparc, 'in_file')
     
-    else: # resting state (TODO) separate datasink?
-        continue
-    
-    def get_subs(subject_id, conds, run_id, model_id, task_id):
-        """ Substitutions for files saved in datasink """
-        subs = [('_subject_id_%s_' % subject_id, '')]
-        subs.append(('_model_id_%d' % model_id, 'model%03d' %model_id))
-        subs.append(('task_id_%s/' % task_id, '/task-%s_' % task_id))
-        subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_warp',
-        'mean'))
-        subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_flirt',
-        'affine'))
-        # substitutions per condition
-        for i in range(len(conds)):
-            subs.append(('_flameo%d/cope1.' % i, 'cope%02d.' % (i + 1)))
-            subs.append(('_flameo%d/varcope1.' % i, 'varcope%02d.' % (i + 1)))
-            subs.append(('_flameo%d/zstat1.' % i, 'zstat%02d.' % (i + 1)))
-            subs.append(('_flameo%d/tstat1.' % i, 'tstat%02d.' % (i + 1)))
-            subs.append(('_flameo%d/res4d.' % i, 'res4d%02d.' % (i + 1)))
-            subs.append(('_warpall%d/cope1_warp.' % i,
-                         'cope%02d.' % (i + 1)))
-            subs.append(('_warpall%d/varcope1_warp.' % (len(conds) + i),
-                         'varcope%02d.' % (i + 1)))
-            subs.append(('_warpall%d/zstat1_warp.' % (2 * len(conds) + i),
-                         'zstat%02d.' % (i + 1)))
-            subs.append(('_warpall%d/cope1_trans.' % i,
-                         'cope%02d.' % (i + 1)))
-            subs.append(('_warpall%d/varcope1_trans.' % (len(conds) + i),
-                         'varcope%02d.' % (i + 1)))
-            subs.append(('_warpall%d/zstat1_trans.' % (2 * len(conds) + i),
-                         'zstat%02d.' % (i + 1)))
-            subs.append(('__get_aparc_means%d/' % i, '/cope%02d_' % (i + 1)))
-        # substitutions per run
-        for i, run_num in enumerate(run_id):
-            subs.append(('__get_aparc_tsnr%d/' % i, '/run%02d_' % run_num))
-            subs.append(('__art%d/' % i, '/run%02d_' % run_num))
-            subs.append(('__dilatemask%d/' % i, '/run%02d_' % run_num))
-            subs.append(('__realign%d/' % i, '/run%02d_' % run_num))
-            subs.append(('__modelgen%d/' % i, '/run%02d_' % run_num))
+        def get_subs(subject_id, conds, run_id, model_id, task_id):
+            """ Substitutions for files saved in datasink """
+            subs = [('_subject_id_%s_' % subject_id, '')]
+            subs.append(('_model_id_%d' % model_id, 'model%03d' %model_id))
+            subs.append(('task_id_%s/' % task_id, '/task-%s_' % task_id))
+            subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_warp',
+            'mean'))
+            subs.append(('bold_dtype_mcf_mask_smooth_mask_gms_tempfilt_mean_flirt',
+            'affine'))
+            # substitutions per condition
+            for i in range(len(conds)):
+                subs.append(('_flameo%d/cope1.' % i, 'cope%02d.' % (i + 1)))
+                subs.append(('_flameo%d/varcope1.' % i, 'varcope%02d.' % (i + 1)))
+                subs.append(('_flameo%d/zstat1.' % i, 'zstat%02d.' % (i + 1)))
+                subs.append(('_flameo%d/tstat1.' % i, 'tstat%02d.' % (i + 1)))
+                subs.append(('_flameo%d/res4d.' % i, 'res4d%02d.' % (i + 1)))
+                subs.append(('_warpall%d/cope1_warp.' % i,
+                             'cope%02d.' % (i + 1)))
+                subs.append(('_warpall%d/varcope1_warp.' % (len(conds) + i),
+                             'varcope%02d.' % (i + 1)))
+                subs.append(('_warpall%d/zstat1_warp.' % (2 * len(conds) + i),
+                             'zstat%02d.' % (i + 1)))
+                subs.append(('_warpall%d/cope1_trans.' % i,
+                             'cope%02d.' % (i + 1)))
+                subs.append(('_warpall%d/varcope1_trans.' % (len(conds) + i),
+                             'varcope%02d.' % (i + 1)))
+                subs.append(('_warpall%d/zstat1_trans.' % (2 * len(conds) + i),
+                             'zstat%02d.' % (i + 1)))
+                subs.append(('__get_aparc_means%d/' % i, '/cope%02d_' % (i + 1)))
+            # substitutions per run
+            for i, run_num in enumerate(run_id):
+                subs.append(('__get_aparc_tsnr%d/' % i, '/run%02d_' % run_num))
+                subs.append(('__art%d/' % i, '/run%02d_' % run_num))
+                subs.append(('__dilatemask%d/' % i, '/run%02d_' % run_num))
+                subs.append(('__realign%d/' % i, '/run%02d_' % run_num))
+                subs.append(('__modelgen%d/' % i, '/run%02d_' % run_num))
 
-        subs.append(('/%s/' % task_id, '/task-%s/' % task_id))
-        subs.append(('/model%03d/task-%s_' % (model_id, task_id), '/'))
-        subs.append(('_bold_dtype_mcf_bet_thresh_dil', '_mask'))
-        subs.append(('mask/model%03d/task-%s/' % (model_id, task_id), 'mask/'))
-        subs.append(('tsnr/model%03d/task-%s/' % (model_id, task_id), 'tsnr/'))
-        subs.append(('_output_warped_image', '_anat2target'))
-        subs.append(('median_flirt_brain_mask', 'median_brain_mask'))
-        subs.append(('median_bbreg_brain_mask', 'median_brain_mask'))
-        return subs
+            subs.append(('/%s/' % task_id, '/task-%s/' % task_id))
+            subs.append(('/model%03d/task-%s_' % (model_id, task_id), '/'))
+            subs.append(('_bold_dtype_mcf_bet_thresh_dil', '_mask'))
+            subs.append(('mask/model%03d/task-%s/' % (model_id, task_id), 'mask/'))
+            subs.append(('tsnr/model%03d/task-%s/' % (model_id, task_id), 'tsnr/'))
+            subs.append(('_output_warped_image', '_anat2target'))
+            subs.append(('median_flirt_brain_mask', 'median_brain_mask'))
+            subs.append(('median_bbreg_brain_mask', 'median_brain_mask'))
+            return subs
 
-    subsgen = Node(Function(input_names=['subject_id', 'conds', 'run_id',
-                                                'model_id', 'task_id'],
-                                   output_names=['substitutions'],
-                                   function=get_subs),
-                      name='subsgen')
-    subsgen.inputs.subject_id = subject_id
-    subsgen.inputs.model_id = model_id
-    subsgen.inputs.task_id = task_id
-    subsgen.inputs.run_id = run_id
+        subsgen = Node(Function(input_names=['subject_id', 'conds', 'run_id',
+                                                    'model_id', 'task_id'],
+                                       output_names=['substitutions'],
+                                       function=get_subs),
+                          name='subsgen')
+        subsgen.inputs.subject_id = subject_id
+        subsgen.inputs.model_id = model_id
+        subsgen.inputs.task_id = task_id
+        subsgen.inputs.run_id = run_id
 
-    # Sink data of interest
-    datasink = Node(DataSink(), name="datasink")
-    datasink.inputs.container = subject_id
+        # Sink data of interest
+        datasink = Node(DataSink(), name="datasink")
+        datasink.inputs.container = subject_id
 
-    wf.connect(contrastgen, 'contrasts', subsgen, 'conds')
-    wf.connect(subsgen, 'substitutions', datasink, 'substitutions')
-    wf.connect([(fixed_fx.get_node('outputspec'), datasink,
-                                 [('res4d', 'res4d'),
-                                  ('copes', 'copes'),
-                                  ('varcopes', 'varcopes'),
-                                  ('zstats', 'zstats'),
-                                  ('tstats', 'tstats')])
-                                 ])
-    wf.connect([(modelfit.get_node('modelgen'), datasink,
-                                 [('design_cov', 'qa.model'),
-                                  ('design_image', 'qa.model.@matrix_image'),
-                                  ('design_file', 'qa.model.@matrix'),
-                                 ])])
-    wf.connect([(joiner, datasink, [('nipy_realign_pars',
-                                      'qa.motion')]),
-                (registration, datasink, [('outputspec.mean2anat_mask', 'qa.mask')])])
-    wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
-    wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
-    wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
-    wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.anat2target')
-    wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
-    if fs_dir:
-        wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
-        wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
-                                              ('summary_file', 'qa.tsnr.@summary')])])
-        wf.connect([(get_roi_mean, datasink, [('avgwf_txt_file', 'copes.roi'),
-                                              ('summary_file', 'copes.roi.@summary')])])
-        wf.connect(sampleaparc, 'summary_file', datasink, 'timeseries.aparc.@summary')
-        wf.connect(sampleaparc, 'avgwf_txt_file', datasink, 'timeseries.aparc')
-    wf.connect([(splitfunc, datasink,
-                 [('copes', 'copes.mni'),
-                  ('varcopes', 'varcopes.mni'),
-                  ('zstats', 'zstats.mni'),
-                  ])])
-    wf.connect(recalc_median, 'median_file', datasink, 'mean')
-    wf.connect(registration, 'outputspec.transformed_mean', datasink, 'mean.mni')
-    wf.connect(registration, 'outputspec.func2anat_transform', datasink, 'xfm.mean2anat')
-    wf.connect(registration, 'outputspec.anat2target_transform', datasink, 'xfm.anat2target')
+        wf.connect(contrastgen, 'contrasts', subsgen, 'conds')
+        wf.connect(subsgen, 'substitutions', datasink, 'substitutions')
+        wf.connect([(fixed_fx.get_node('outputspec'), datasink,
+                                     [('res4d', 'res4d'),
+                                      ('copes', 'copes'),
+                                      ('varcopes', 'varcopes'),
+                                      ('zstats', 'zstats'),
+                                      ('tstats', 'tstats')])
+                                     ])
+        wf.connect([(modelfit.get_node('modelgen'), datasink,
+                                     [('design_cov', 'qa.model'),
+                                      ('design_image', 'qa.model.@matrix_image'),
+                                      ('design_file', 'qa.model.@matrix'),
+                                     ])])
+        wf.connect([(joiner, datasink, [('nipy_realign_pars',
+                                          'qa.motion')]),
+                    (registration, datasink, [('outputspec.mean2anat_mask', 'qa.mask')])])
+        wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
+        wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
+        wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
+        wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.anat2target')
+        wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
+        if fs_dir:
+            wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
+            wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
+                                                  ('summary_file', 'qa.tsnr.@summary')])])
+            wf.connect([(get_roi_mean, datasink, [('avgwf_txt_file', 'copes.roi'),
+                                                  ('summary_file', 'copes.roi.@summary')])])
+            wf.connect(sampleaparc, 'summary_file', datasink, 'timeseries.aparc.@summary')
+            wf.connect(sampleaparc, 'avgwf_txt_file', datasink, 'timeseries.aparc')
+        wf.connect([(splitfunc, datasink,
+                     [('copes', 'copes.mni'),
+                      ('varcopes', 'varcopes.mni'),
+                      ('zstats', 'zstats.mni'),
+                      ])])
+        wf.connect(recalc_median, 'median_file', datasink, 'mean')
+        wf.connect(registration, 'outputspec.transformed_mean', datasink, 'mean.mni')
+        wf.connect(registration, 'outputspec.func2anat_transform', datasink, 'xfm.mean2anat')
+        wf.connect(registration, 'outputspec.anat2target_transform', datasink, 'xfm.anat2target')
 
-    """
-    Set processing parameters
-    """
+        """
+        Set processing parameters
+        """
 
-    datasink.inputs.base_directory = outdir
-    return wf
+        datasink.inputs.base_directory = outdir
+        return wf
 
 """
 The following functions run the whole workflow.
@@ -1605,7 +1812,8 @@ if __name__ == '__main__':
                         help="Apply topup correction" + defstr)
     parser.add_argument('--debug', action="store_true",
                         help="Activate nipype debug mode" + defstr)
-
+    parser.add_argument('--cc', action="store_true",
+                        help="CompCor correction for task analysis" + defstr)
     args = parser.parse_args()
     
     data_dir = os.path.abspath(args.datasetdir)
