@@ -1110,8 +1110,12 @@ def analyze_bids_dataset(bold_files,
         wf.connect(meanfunc4, 'out_file', addmean, 'operand_file')
         # once mean is added back - pass in to modelfit
         wf.connect(addmean, 'out_file', modelfit, 'inputspec.functional_data')
-    else: #FSL 5.07 and higher
-        wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
+    else: # older FSL doesn't remove mean
+        wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
+    modelfit.inputs.inputspec.bases = {'dgamma': {'derivs': use_derivatives}}
+    modelfit.inputs.inputspec.model_serial_correlations = True
+    modelfit.inputs.inputspec.film_threshold = 1000
+
 
     
     def motion_regressors(motion_params, order=0, derivatives=1):
@@ -1546,11 +1550,6 @@ def analyze_bids_dataset(bold_files,
     """
     Set processing parameters
     """
-
-    #modelspec.inputs.high_pass_filter_cutoff = hpcutoff
-    modelfit.inputs.inputspec.bases = {'dgamma': {'derivs': use_derivatives}}
-    modelfit.inputs.inputspec.model_serial_correlations = True
-    modelfit.inputs.inputspec.film_threshold = 1000
 
     datasink.inputs.base_directory = outdir
     return wf
