@@ -1060,9 +1060,19 @@ def analyze_bids_dataset(bold_files,
             out_files.append(out_file)
         return list_to_filename(out_files)
 
-        masker = Node(fsl.BET(), name='mask-bet')
-        masker.inputs.mask = True
-        wf.connect(recalc_median, 'median_file', masker, 'in_file')
+    masker = Node(fsl.BET(), name='mask-bet')
+    masker.inputs.mask = True
+    wf.connect(recalc_median, 'median_file', masker, 'in_file')
+
+    bandpass = Node(Function(input_names=['files', 'lowpass_freq',
+                                          'highpass_freq', 'fs'],
+                             output_names=['out_files'],
+                             function=bandpass_filter,
+                             imports=imports),
+                    name='bandpass_unsmooth')
+    bandpass.inputs.fs = 1. / TR
+    bandpass.inputs.highpass_freq = highpass_freq
+    bandpass.inputs.lowpass_freq = lowpass_freq
 
     #########################
     # Preprocessing for event
@@ -1100,15 +1110,6 @@ def analyze_bids_dataset(bold_files,
         wf.connect(medianval, ('out_stat', getmeanscale), meanscale, 'op_string')
         
         # Bandpass filters before registration
-        bandpass = Node(Function(input_names=['files', 'lowpass_freq',
-                                              'highpass_freq', 'fs'],
-                                 output_names=['out_files'],
-                                 function=bandpass_filter,
-                                 imports=imports),
-                        name='bandpass_unsmooth')
-        bandpass.inputs.fs = 1. / TR
-        bandpass.inputs.highpass_freq = highpass_freq
-        bandpass.inputs.lowpass_freq = lowpass_freq
         wf.connect(meanscale, 'out_file', bandpass, 'files')
 
         if version > 507:
@@ -1362,7 +1363,7 @@ def analyze_bids_dataset(bold_files,
         pickfirst = lambda x: x[0] if isinstance(x, (list, tuple)) else x
 
         wf.connect(contrastgen, 'contrasts', cope_sorter, 'contrasts')
-        wf.connect([(registration, fixed_fx, [('outputspec.mean2anat_mask', 'flameo.mask_file')]),
+        wf.connect([(masker, fixed_fx, [('mask_file', 'flameo.mask_file')]),
                     (modelfit, cope_sorter, [('outputspec.copes', 'copes')]),
                     (modelfit, cope_sorter, [('outputspec.varcopes', 'varcopes')]),
                     (cope_sorter, fixed_fx, [('copes', 'inputspec.copes'),
@@ -1874,7 +1875,7 @@ if __name__ == '__main__':
 
     # View workflow graph
     #wf.write_graph(graph2use='exec')
-    
+
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
