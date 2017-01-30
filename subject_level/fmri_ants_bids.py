@@ -317,7 +317,8 @@ def create_fs_reg_workflow(name='registration'):
                                                 'segmentation_files',
                                                 'anat2target',
                                                 'aparc',
-                                                'min_cost_file']),
+                                                'min_cost_file',
+                                                'mean2anat_mask']),
                       name='outputspec')
 
     # Get the subject's freesurfer source directory
@@ -341,6 +342,10 @@ def create_fs_reg_workflow(name='registration'):
     register.connect(inputnode, 'subject_id', bbregister, 'subject_id')
     register.connect(inputnode, 'mean_image', bbregister, 'source_file')
     register.connect(inputnode, 'subjects_dir', bbregister, 'subjects_dir')
+
+    # Create a mask of the median coregistered to the anatomical image
+    mean2anat_mask = Node(fsl.BET(mask=True), name='mean2anat_mask')
+    register.connect(bbregister, 'registered_file', mean2anat_mask, 'in_file')
 
     """
     Estimate the tissue classes from the anatomical image. But use aparc+aseg's brain mask
@@ -491,6 +496,8 @@ def create_fs_reg_workflow(name='registration'):
     register.connect(merge, 'out', outputnode, 'transforms')
     register.connect(bbregister, 'min_cost_file',
                      outputnode, 'min_cost_file')
+    register.connect(mean2anat_mask, 'mask_file',
+                     outputnode, 'mean2anat_mask')
     return register
 
 def create_topup_workflow(num_slices, readout, 
