@@ -955,7 +955,7 @@ def analyze_bids_dataset(bold_files,
                           joinfield=['corrected_bolds',
                                      'nipy_realign_pars',
                                      'topup_movpars'],
-                          name='topup_joiner')
+                          name='joiner_topup')
         wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'corrected_bolds')
         wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpars')
     else:
@@ -965,7 +965,7 @@ def analyze_bids_dataset(bold_files,
                           joinsource='infosource',
                           joinfield=['corrected_bolds',
                                      'nipy_realign_pars'],
-                          name='notopup_joiner')
+                          name='joiner_notopup')
         wf.connect(realign_run, 'out_file', joiner, 'corrected_bolds')
     
     # save motion params regardless of topup
@@ -1059,16 +1059,23 @@ def analyze_bids_dataset(bold_files,
             img_out.to_filename(out_file)
             out_files.append(out_file)
         return list_to_filename(out_files)
-    
+
+        masker = Node(fsl.BET(), name='mask-bet')
+        masker.inputs.mask = True
+        wf.connect(recalc_median, 'median_file', masker, 'in_file')
+
+    #########################
+    # Preprocessing for event
+    #########################
     if behav:
-        ## some more preproc on funcs for bold analysis
+
         # apply mask to funcs
         maskfunc = MapNode(interface=fsl.ImageMaths(suffix='_bet',
                                                     op_string='-mas'),
                            iterfield=['in_file'],
                            name='maskfunc')
         wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
-        wf.connect(registration, 'outputspec.mean2anat_mask', maskfunc, 'in_file2')
+        wf.connect(masker, 'mask_file', maskfunc, 'in_file2')
         
         # find median value of run (NOTE: different medians if no topup)
         medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
@@ -1125,386 +1132,148 @@ def analyze_bids_dataset(bold_files,
         modelfit.inputs.inputspec.model_serial_correlations = True
         modelfit.inputs.inputspec.film_threshold = 1000
 
+    ###############
+    # additional preprocessing 
+    # standard for resting, optional for event
+    ################
+    if not behav or comp_cor:
 
-    
-    def motion_regressors(motion_params, order=0, derivatives=1):
-        """Compute motion regressors upto given order and derivative
-        motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)"""
-        out_files = []
-        for idx, filename in enumerate(filename_to_list(motion_params)):
-            params = np.genfromtxt(filename)
-            out_params = params
-            for d in range(1, derivatives + 1):
-                cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
-                                     params))
-                out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
-            out_params2 = out_params
-            for i in range(2, order + 1):
-                out_params2 = np.hstack((out_params2, np.power(out_params, i)))
-            filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
-            np.savetxt(filename, out_params2, fmt=str("%.10f"))
-            out_files.append(filename)
-        return out_files
-    
-    
-    motreg = Node(Function(input_names=['motion_params', 'order',
-                                        'derivatives'],
-                           output_names=['out_files'],
-                           function=motion_regressors,
-                           imports=imports),
-                  name='getmotionregress')
-    wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
-    
-    def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
-        """Builds a regressor set comprisong motion parameters, composite norm and
-        outliers
-        The outliers are added as a single time point column for each outlier
-        Parameters
-        ----------
-        motion_params: a text file containing motion parameters and its derivatives
-        comp_norm: a text file containing the composite norm
-        outliers: a text file containing 0-based outlier indices
-        detrend_poly: number of polynomials to add to detrend
-        Returns
-        -------
-        components_file: a text file containing all the regressors
-        """
-        out_files = []
-        for idx, filename in enumerate(filename_to_list(motion_params)):
-            params = np.genfromtxt(filename)
-            norm_val = np.genfromtxt(filename_to_list(comp_norm)[idx])
-            out_params = np.hstack((params, norm_val[:, None]))
-            try:
-                outlier_val = np.genfromtxt(filename_to_list(outliers)[idx])
-            except IOError:
-                outlier_val = np.empty((0))
-            for index in np.atleast_1d(outlier_val):
-                outlier_vector = np.zeros((out_params.shape[0], 1))
-                outlier_vector[index] = 1
-                out_params = np.hstack((out_params, outlier_vector))
-            if detrend_poly:
-                timepoints = out_params.shape[0]
-                X = np.empty((timepoints, 0))
-                for i in range(detrend_poly):
-                    X = np.hstack((X, legendre(
-                        i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
-                out_params = np.hstack((out_params, X))
-            filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
-            np.savetxt(filename, out_params, fmt=str("%.10f"))
-            out_files.append(filename)
-        return out_files
-
-    # Create a filter to remove motion and art confounds
-    createfilter1 = Node(Function(input_names=['motion_params', 'comp_norm',
-                                               'outliers', 'detrend_poly'],
-                                  output_names=['out_files'],
-                                  function=build_filter1,
-                                  imports=imports),
-                            name='makemotionbasedfilter')
-    createfilter1.inputs.detrend_poly = 2
-    wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
-    wf.connect(art, 'norm_files', createfilter1, 'comp_norm')
-    wf.connect(art, 'outlier_files', createfilter1, 'outliers')
-
-    filter1 = MapNode(fsl.GLM(out_f_name='F_mcart.nii.gz',
-                              out_pf_name='pF_mcart.nii.gz',
-                              demean=True),
-                      iterfield=['in_file', 'design', 'out_res_name'],
-                      name='filtermotion')
-    wf.connect(realign_all, 'out_file', filter1, 'in_file')
-    wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
-               filter1, 'out_res_name')
-    wf.connect(createfilter1, 'out_files', filter1, 'design')
-
-    def selectindex(files, idx):
-        """ Utility function for registration seg files """
-        import numpy as np
-        from nipype.utils.filemanip import filename_to_list, list_to_filename
-        return list_to_filename(np.array(filename_to_list(files))[idx].tolist())  
-
-    compcor = MapNode(CompCor(), iterfield=['realigned_file','components_file'], 
-                      name='aCompCor')
-    compcor.inputs.num_components = 5
-    wf.connect(filter1, 'out_res', compcor, 'realigned_file')
-    wf.connect(registration, ('outputspec.segmentation_files', selectindex, [0,2]), 
-               compcor, 'mask_file')
-
-    def stacker(motion, physio):
-        """ Combine motion regressors with physiological noise """
-        import numpy as np
-        import os
-        components = np.hstack((np.genfromtxt(physio),np.genfromtxt(motion)))
-        components_file = os.path.join(os.getcwd(), 'noise_components.txt')
-        np.savetxt(components_file, components, fmt=str("%.10f"))
-        return components_file
-
-    compstack = MapNode(Function(input_names=['motion', 'physio'],
-                                 output_names=['components_file'],
-                                 function=stacker),
-                        iterfield=['motion', 'physio'],
-                        name='physio_stacker')
-    wf.connect(createfilter1, 'out_files', compstack, 'motion')
-    wf.connect(compcor, 'components_file', compstack, 'physio')
-
-    filter2 = MapNode(fsl.GLM(out_f_name='F.nii.gz',
-                              out_pf_name='pF.nii.gz',
-                              demean=True),
-                      iterfield=['in_file', 'design', 'out_res_name'],
-                      name='filter_noise_nosmooth')
-    wf.connect(filter1, 'out_res', filter2, 'in_file')
-    wf.connect(filter1, ('out_res', rename, '_cleaned'),
-               filter2, 'out_res_name')
-    wf.connect(compstack, 'components_file', filter2, 'design')
-    wf.connect(registration, 'outputspec.mean2anat_mask', filter2, 'mask')
-
-    # resting state
-    if not behav:
-        bandpass_rs = bandpass.clone(name='bp_rs')
-        wf.connect(filter2, 'out_res', smooth_rs, 'in_file')
-
-        smooth_rs = smooth.clone(name="smooth_rs")
-        wf.connect(smooth_rs, 'out_file', bandpass_rs, 'files')
-
-        collector = Node(Merge(2), name='collect_streams')
-        wf.connect(smooth_rs, 'out_file', collector, 'in1')
-        wf.connect(bandpass_rs, 'out_files', collector, 'in2')
-
-        """
-        Transform the remaining images. First to anatomical and then to target
-        """
-        warpall = MapNode(ants.ApplyTransforms(), iterfield=['input_image'],
-                          name='warpall')
-        warpall.inputs.input_image_type = 3
-        warpall.inputs.interpolation = 'Linear'
-        warpall.inputs.invert_transform_flags = [False, False]
-        warpall.inputs.terminal_output = 'file'
-        warpall.inputs.reference_image = target_file
-        warpall.inputs.args = '--float'
-        warpall.inputs.num_threads = 2
-        warpall.plugin_args = {'sbatch_args': '-c%d' % 2}
-
-        # transform to target
-        wf.connect(collector, 'out', warpall, 'input_image')
-        wf.connect(registration, 'outputspec.transforms', warpall, 'transforms')
-
-        mask_target = Node(fsl.ImageMaths(op_string='-bin'), name='target_mask')
-
-        wf.connect(registration, 'outputspec.anat2target', mask_target, 'in_file')
-
-        maskts = MapNode(fsl.ApplyMask(), iterfield=['in_file'], name='ts_masker')
-        wf.connect(warpall, 'output_image', maskts, 'in_file')
-        wf.connect(mask_target, 'out_file', maskts, 'mask_file')
-
-            # Sample the average time series in aparc ROIs
-        sampleaparc = MapNode(freesurfer.SegStats(default_color_table=True),
-                              iterfield=['in_file', 'summary_file',
-                                         'avgwf_txt_file'],
-                              name='aparc_ts')
-        sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
-                                         range(49, 55) + [58] + range(1001, 1036) +
-                                         range(2001, 2036))
-
-        wf.connect(registration, 'outputspec.aparc',
-                   sampleaparc, 'segmentation_file')
-        wf.connect(collector, 'out', sampleaparc, 'in_file')
-
-        def get_names(files, suffix):
-            """Generate appropriate names for output files
-            """
-            from nipype.utils.filemanip import (split_filename, filename_to_list,
-                                                list_to_filename)
-            import os
-            out_names = []
-            for filename in files:
-                path, name, _ = split_filename(filename)
-                out_names.append(os.path.join(path,name + suffix))
-            return list_to_filename(out_names)
-
-        wf.connect(collector, ('out', get_names, '_avgwf.txt'),
-                   sampleaparc, 'avgwf_txt_file')
-        wf.connect(collector, ('out', get_names, '_summary.stats'),
-                   sampleaparc, 'summary_file')
-
-        # Sample the time series onto the surface of the target surface. Performs
-        # sampling into left and right hemisphere
-        target = Node(IdentityInterface(fields=['target_subject']), name='target')
-        target.iterables = ('target_subject', filename_to_list(target_subject))
-
-        samplerlh = MapNode(fs.SampleToSurface(),
-                            iterfield=['source_file'],
-                            name='sampler_lh')
-        samplerlh.inputs.sampling_method = "average"
-        samplerlh.inputs.sampling_range = (0.1, 0.9, 0.1)
-        samplerlh.inputs.sampling_units = "frac"
-        samplerlh.inputs.interp_method = "trilinear"
-        samplerlh.inputs.smooth_surf = surf_fwhm
-        #samplerlh.inputs.cortex_mask = True
-        samplerlh.inputs.out_type = 'niigz'
-        samplerlh.inputs.subjects_dir = fs_dir
-
-        samplerrh = samplerlh.clone('sampler_rh')
-
-        samplerlh.inputs.hemi = 'lh'
-        wf.connect(collector, 'out', samplerlh, 'source_file')
-        wf.connect(registration, 'outputspec.out_reg_file', samplerlh, 'reg_file')
-        wf.connect(target, 'target_subject', samplerlh, 'target_subject')
-
-        samplerrh.set_input('hemi', 'rh')
-        wf.connect(collector, 'out', samplerrh, 'source_file')
-        wf.connect(registration, 'outputspec.out_reg_file', samplerrh, 'reg_file')
-        wf.connect(target, 'target_subject', samplerrh, 'target_subject')
-
-        def combine_hemi(left, right):
-            """Combine left and right hemisphere time series into a single text file"""
-            lh_data = nb.load(left).get_data()
-            rh_data = nb.load(right).get_data()
-
-            indices = np.vstack((1000000 + np.arange(0, lh_data.shape[0])[:, None],
-                                 2000000 + np.arange(0, rh_data.shape[0])[:, None]))
-            all_data = np.hstack((indices, np.vstack((lh_data.squeeze(),
-                                                      rh_data.squeeze()))))
-            filename = left.split('.')[1] + '_combined.txt'
-            np.savetxt(filename, all_data,
-                       fmt=str(','.join(['%d'] + ['%.10f'] * (all_data.shape[1] - 1))))
-            return os.path.abspath(filename)
-
-        # Combine left and right hemisphere to text file
-        combiner = MapNode(Function(input_names=['left', 'right'],
-                                    output_names=['out_file'],
-                                    function=combine_hemi,
-                                    imports=imports),
-                           iterfield=['left', 'right'],
-                           name="combiner")
-        wf.connect(samplerlh, 'out_file', combiner, 'left')
-        wf.connect(samplerrh, 'out_file', combiner, 'right')
-
-        def extract_subrois(timeseries_file, label_file, indices):
-            """Extract voxel time courses for each subcortical roi index
+        def motion_regressors(motion_params, order=0, derivatives=1):
+            """Compute motion regressors upto given order and derivative
+            motion + d(motion)/dt + d2(motion)/dt2 (linear + quadratic)"""
+            out_files = []
+            for idx, filename in enumerate(filename_to_list(motion_params)):
+                params = np.genfromtxt(filename)
+                out_params = params
+                for d in range(1, derivatives + 1):
+                    cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
+                                         params))
+                    out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
+                out_params2 = out_params
+                for i in range(2, order + 1):
+                    out_params2 = np.hstack((out_params2, np.power(out_params, i)))
+                filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
+                np.savetxt(filename, out_params2, fmt=str("%.10f"))
+                out_files.append(filename)
+            return out_files
+        
+        
+        motreg = Node(Function(input_names=['motion_params', 'order',
+                                            'derivatives'],
+                               output_names=['out_files'],
+                               function=motion_regressors,
+                               imports=imports),
+                      name='getmotionregress')
+        wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
+        
+        def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
+            """Builds a regressor set comprisong motion parameters, composite norm and
+            outliers
+            The outliers are added as a single time point column for each outlier
             Parameters
             ----------
-            timeseries_file: a 4D Nifti file
-            label_file: a 3D file containing rois in the same space/size of the 4D file
-            indices: a list of indices for ROIs to extract.
+            motion_params: a text file containing motion parameters and its derivatives
+            comp_norm: a text file containing the composite norm
+            outliers: a text file containing 0-based outlier indices
+            detrend_poly: number of polynomials to add to detrend
             Returns
             -------
-            out_file: a text file containing time courses for each voxel of each roi
-                The first four columns are: freesurfer index, i, j, k positions in the
-                label file
+            components_file: a text file containing all the regressors
             """
-            img = nb.load(timeseries_file)
-            data = img.get_data()
-            roiimg = nb.load(label_file)
-            rois = roiimg.get_data()
-            prefix = split_filename(timeseries_file)[1]
-            out_ts_file = os.path.join(os.getcwd(), '%s_subcortical_ts.txt' % prefix)
-            with open(out_ts_file, 'wt') as fp:
-                for fsindex in indices:
-                    ijk = np.nonzero(rois == fsindex)
-                    ts = data[ijk]
-                    for i0, row in enumerate(ts):
-                        fp.write('%d,%d,%d,%d,' % (fsindex, ijk[0][i0],
-                                                   ijk[1][i0], ijk[2][i0]) +
-                                 ','.join(['%.10f' % val for val in row]) + '\n')
-            return out_ts_file
+            out_files = []
+            for idx, filename in enumerate(filename_to_list(motion_params)):
+                params = np.genfromtxt(filename)
+                norm_val = np.genfromtxt(filename_to_list(comp_norm)[idx])
+                out_params = np.hstack((params, norm_val[:, None]))
+                try:
+                    outlier_val = np.genfromtxt(filename_to_list(outliers)[idx])
+                except IOError:
+                    outlier_val = np.empty((0))
+                for index in np.atleast_1d(outlier_val):
+                    outlier_vector = np.zeros((out_params.shape[0], 1))
+                    outlier_vector[index] = 1
+                    out_params = np.hstack((out_params, outlier_vector))
+                if detrend_poly:
+                    timepoints = out_params.shape[0]
+                    X = np.empty((timepoints, 0))
+                    for i in range(detrend_poly):
+                        X = np.hstack((X, legendre(
+                            i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
+                    out_params = np.hstack((out_params, X))
+                filename = os.path.join(os.getcwd(), "filter_regressor%02d.txt" % idx)
+                np.savetxt(filename, out_params, fmt=str("%.10f"))
+                out_files.append(filename)
+            return out_files
 
-        # Sample the time series file for each subcortical roi
-        ts2txt = MapNode(Function(input_names=['timeseries_file', 'label_file',
-                                               'indices'],
-                                  output_names=['out_file'],
-                                  function=extract_subrois,
-                                  imports=imports),
-                         iterfield=['timeseries_file'],
-                         name='getsubcortts')
-        ts2txt.inputs.indices = [8] + range(10, 14) + [17, 18, 26, 47] +\
-                                range(49, 55) + [58]
-        ts2txt.inputs.label_file = \
-            os.path.abspath(('OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_'
-                             '2mm_v2.nii.gz'))
-        wf.connect(maskts, 'out_file', ts2txt, 'timeseries_file')
+        # Create a filter to remove motion and art confounds
+        createfilter1 = Node(Function(input_names=['motion_params', 'comp_norm',
+                                                   'outliers', 'detrend_poly'],
+                                      output_names=['out_files'],
+                                      function=build_filter1,
+                                      imports=imports),
+                                name='makemotionbasedfilter')
+        createfilter1.inputs.detrend_poly = 2
+        wf.connect(motreg, 'out_files', createfilter1, 'motion_params')
+        wf.connect(art, 'norm_files', createfilter1, 'comp_norm')
+        wf.connect(art, 'outlier_files', createfilter1, 'outliers')
 
+        filter1 = MapNode(fsl.GLM(out_f_name='F_mcart.nii.gz',
+                                  out_pf_name='pF_mcart.nii.gz',
+                                  demean=True),
+                          iterfield=['in_file', 'design', 'out_res_name'],
+                          name='filtermotion')
+        wf.connect(realign_all, 'out_file', filter1, 'in_file')
+        wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
+                   filter1, 'out_res_name')
+        wf.connect(createfilter1, 'out_files', filter1, 'design')
 
-######################
-# Sink and end resting
-######################
-        
-        substitutions = [('_target_subject_', ''),
-                         ('_filtermotart_cleaned_bp_trans_masked', ''),
-                         ('_filtermotart_cleaned_bp', ''),
-                         ]
-        substitutions += [("_smooth%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_ts_masker%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_getsubcortts%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_combiner%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_filtermotion%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_filter_noise_nosmooth%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_makecompcorfilter%d" % i,"") for i in range(11)[::-1]]
-        substitutions += [("_get_aparc_tsnr%d/" % i, "run%d_" % (i + 1)) for i in range(11)[::-1]]
+        def selectindex(files, idx):
+            """ Utility function for registration seg files """
+            import numpy as np
+            from nipype.utils.filemanip import filename_to_list, list_to_filename
+            return list_to_filename(np.array(filename_to_list(files))[idx].tolist())  
 
-        substitutions += [("T1_out_brain_pve_0_maths_warped", "compcor_csf"),
-                          ("T1_out_brain_pve_1_maths_warped", "compcor_gm"),
-                          ("T1_out_brain_pve_2_maths_warped", "compcor_wm"),
-                          ("output_warped_image_maths", "target_brain_mask"),
-                          ("median_brain_mask", "native_brain_mask"),
-                          ("corr_", "")]
+        compcor = MapNode(CompCor(), iterfield=['realigned_file','components_file'], 
+                          name='aCompCor')
+        compcor.inputs.num_components = 5
+        wf.connect(filter1, 'out_res', compcor, 'realigned_file')
+        wf.connect(registration, ('outputspec.segmentation_files', selectindex, [0,2]), 
+                   compcor, 'mask_file')
 
-        regex_subs = [('_combiner.*/sar', '/smooth/'),
-                      ('_combiner.*/ar', '/unsmooth/'),
-                      ('_aparc_ts.*/sar', '/smooth/'),
-                      ('_aparc_ts.*/ar', '/unsmooth/'),
-                      ('_getsubcortts.*/sar', '/smooth/'),
-                      ('_getsubcortts.*/ar', '/unsmooth/'),
-                      ('series/sar', 'series/smooth/'),
-                      ('series/ar', 'series/unsmooth/'),
-                      ('_inverse_transform./', ''),
-                      ]
-        # Save the relevant data into an output directory
-        datasink = Node(interface=DataSink(), name="datasink")
-        datasink.inputs.base_directory = sink_directory
-        datasink.inputs.substitutions = substitutions
-        datasink.inputs.regexp_substitutions = regex_subs
-        wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
-        wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
-        wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
-        wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
-        wf.connect(registration, 'outputspec.segmentation_files', datasink, 'mask_files')
-        wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.ants')
-        wf.connect(registration, 'outputspec.mean2anat_mask', datasink, 'mask_files.@brainmask')
-        wf.connect(mask_target, 'out_file', datasink, 'mask_files.target')
-        wf.connect(filter1, 'out_f', datasink, 'qa.compmaps.@mc_F')
-        wf.connect(filter1, 'out_pf', datasink, 'qa.compmaps.@mc_pF')
-        wf.connect(filter2, 'out_f', datasink, 'qa.compmaps')
-        wf.connect(filter2, 'out_pf', datasink, 'qa.compmaps.@p')
-        wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
-        wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
-        wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
-                                              ('summary_file', 'qa.tsnr.@summary')])])
+        def stacker(motion, physio):
+            """ Combine motion regressors with physiological noise """
+            import numpy as np
+            import os
+            components = np.hstack((np.genfromtxt(physio),np.genfromtxt(motion)))
+            components_file = os.path.join(os.getcwd(), 'noise_components.txt')
+            np.savetxt(components_file, components, fmt=str("%.10f"))
+            return components_file
 
-        wf.connect(bandpass, 'out_files', datasink, 'timeseries.@bandpassed')
-        wf.connect(smooth, 'out_file', datasink, 'timeseries.@smoothed')
-        wf.connect(createfilter1, 'out_files',
-                   datasink, 'regress.@regressors')
-        wf.connect(compcor, 'components_file',
-                   datasink, 'regress.@compcorr')
-        wf.connect(maskts, 'out_file', datasink, 'timeseries.target')
-        wf.connect(sampleaparc, 'summary_file',
-                   datasink, 'parcellations.aparc')
-        wf.connect(sampleaparc, 'avgwf_txt_file',
-                   datasink, 'parcellations.aparc.@avgwf')
-        wf.connect(ts2txt, 'out_file',
-                   datasink, 'parcellations.grayo.@subcortical')
+        compstack = MapNode(Function(input_names=['motion', 'physio'],
+                                     output_names=['components_file'],
+                                     function=stacker),
+                            iterfield=['motion', 'physio'],
+                            name='physio_stacker')
+        wf.connect(createfilter1, 'out_files', compstack, 'motion')
+        wf.connect(compcor, 'components_file', compstack, 'physio')
 
-        datasink2 = Node(interface=DataSink(), name="datasink2")
-        datasink2.inputs.base_directory = outdir
-        datasink2.inputs.substitutions = substitutions
-        datasink2.inputs.regexp_substitutions = regex_subs
-        wf.connect(combiner, 'out_file',
-                   datasink2, 'parcellations.grayo.@surface')
-        return wf
+        filter2 = MapNode(fsl.GLM(out_f_name='F.nii.gz',
+                                  out_pf_name='pF.nii.gz',
+                                  demean=True),
+                          iterfield=['in_file', 'design', 'out_res_name'],
+                          name='filter_noise_nosmooth')
+        wf.connect(filter1, 'out_res', filter2, 'in_file')
+        wf.connect(filter1, ('out_res', rename, '_cleaned'),
+                   filter2, 'out_res_name')
+        wf.connect(compstack, 'components_file', filter2, 'design')
+        #wf.connect(registration, 'outputspec.mean2anat_mask', filter2, 'mask')
+        wf.connect(masker, 'mask_file', filter2, 'mask')
 
-###############
-# Task modeling
-###############
-    if behav: 
+    #########
+    # TASK
+    #########
+    if behav:
+
         def get_contrasts(contrast_file, task_id, conds):
             """ Setup a basic set of contrasts, a t-test per condition """
             import numpy as np
@@ -1768,6 +1537,249 @@ def analyze_bids_dataset(bold_files,
         datasink.inputs.base_directory = outdir
         return wf
 
+    #########
+    # RESTING
+    #########
+    else: # no onsets
+
+        bandpass_rs = bandpass.clone(name='bp_rs')
+        wf.connect(filter2, 'out_res', smooth_rs, 'in_file')
+
+        smooth_rs = smooth.clone(name="smooth_rs")
+        wf.connect(smooth_rs, 'out_file', bandpass_rs, 'files')
+
+        collector = Node(Merge(2), name='collect_streams')
+        wf.connect(smooth_rs, 'out_file', collector, 'in1')
+        wf.connect(bandpass_rs, 'out_files', collector, 'in2')
+
+        """
+        Transform the remaining images. First to anatomical and then to target
+        """
+        warpall = MapNode(ants.ApplyTransforms(), iterfield=['input_image'],
+                          name='warpall')
+        warpall.inputs.input_image_type = 3
+        warpall.inputs.interpolation = 'Linear'
+        warpall.inputs.invert_transform_flags = [False, False]
+        warpall.inputs.terminal_output = 'file'
+        warpall.inputs.reference_image = target_file
+        warpall.inputs.args = '--float'
+        warpall.inputs.num_threads = 2
+        warpall.plugin_args = {'sbatch_args': '-c%d' % 2}
+
+        # transform to target
+        wf.connect(collector, 'out', warpall, 'input_image')
+        wf.connect(registration, 'outputspec.transforms', warpall, 'transforms')
+
+        mask_target = Node(fsl.ImageMaths(op_string='-bin'), name='target_mask')
+
+        wf.connect(registration, 'outputspec.anat2target', mask_target, 'in_file')
+
+        maskts = MapNode(fsl.ApplyMask(), iterfield=['in_file'], name='ts_masker')
+        wf.connect(warpall, 'output_image', maskts, 'in_file')
+        wf.connect(mask_target, 'out_file', maskts, 'mask_file')
+
+            # Sample the average time series in aparc ROIs
+        sampleaparc = MapNode(freesurfer.SegStats(default_color_table=True),
+                              iterfield=['in_file', 'summary_file',
+                                         'avgwf_txt_file'],
+                              name='aparc_ts')
+        sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
+                                         range(49, 55) + [58] + range(1001, 1036) +
+                                         range(2001, 2036))
+
+        wf.connect(registration, 'outputspec.aparc',
+                   sampleaparc, 'segmentation_file')
+        wf.connect(collector, 'out', sampleaparc, 'in_file')
+
+        def get_names(files, suffix):
+            """Generate appropriate names for output files
+            """
+            from nipype.utils.filemanip import (split_filename, filename_to_list,
+                                                list_to_filename)
+            import os
+            out_names = []
+            for filename in files:
+                path, name, _ = split_filename(filename)
+                out_names.append(os.path.join(path,name + suffix))
+            return list_to_filename(out_names)
+
+        wf.connect(collector, ('out', get_names, '_avgwf.txt'),
+                   sampleaparc, 'avgwf_txt_file')
+        wf.connect(collector, ('out', get_names, '_summary.stats'),
+                   sampleaparc, 'summary_file')
+
+        # Sample the time series onto the surface of the target surface. Performs
+        # sampling into left and right hemisphere
+        target = Node(IdentityInterface(fields=['target_subject']), name='target')
+        target.iterables = ('target_subject', filename_to_list(target_subject))
+
+        samplerlh = MapNode(fs.SampleToSurface(),
+                            iterfield=['source_file'],
+                            name='sampler_lh')
+        samplerlh.inputs.sampling_method = "average"
+        samplerlh.inputs.sampling_range = (0.1, 0.9, 0.1)
+        samplerlh.inputs.sampling_units = "frac"
+        samplerlh.inputs.interp_method = "trilinear"
+        samplerlh.inputs.smooth_surf = surf_fwhm
+        #samplerlh.inputs.cortex_mask = True
+        samplerlh.inputs.out_type = 'niigz'
+        samplerlh.inputs.subjects_dir = fs_dir
+
+        samplerrh = samplerlh.clone('sampler_rh')
+
+        samplerlh.inputs.hemi = 'lh'
+        wf.connect(collector, 'out', samplerlh, 'source_file')
+        wf.connect(registration, 'outputspec.out_reg_file', samplerlh, 'reg_file')
+        wf.connect(target, 'target_subject', samplerlh, 'target_subject')
+
+        samplerrh.set_input('hemi', 'rh')
+        wf.connect(collector, 'out', samplerrh, 'source_file')
+        wf.connect(registration, 'outputspec.out_reg_file', samplerrh, 'reg_file')
+        wf.connect(target, 'target_subject', samplerrh, 'target_subject')
+
+        def combine_hemi(left, right):
+            """Combine left and right hemisphere time series into a single text file"""
+            lh_data = nb.load(left).get_data()
+            rh_data = nb.load(right).get_data()
+
+            indices = np.vstack((1000000 + np.arange(0, lh_data.shape[0])[:, None],
+                                 2000000 + np.arange(0, rh_data.shape[0])[:, None]))
+            all_data = np.hstack((indices, np.vstack((lh_data.squeeze(),
+                                                      rh_data.squeeze()))))
+            filename = left.split('.')[1] + '_combined.txt'
+            np.savetxt(filename, all_data,
+                       fmt=str(','.join(['%d'] + ['%.10f'] * (all_data.shape[1] - 1))))
+            return os.path.abspath(filename)
+
+        # Combine left and right hemisphere to text file
+        combiner = MapNode(Function(input_names=['left', 'right'],
+                                    output_names=['out_file'],
+                                    function=combine_hemi,
+                                    imports=imports),
+                           iterfield=['left', 'right'],
+                           name="combiner")
+        wf.connect(samplerlh, 'out_file', combiner, 'left')
+        wf.connect(samplerrh, 'out_file', combiner, 'right')
+
+        def extract_subrois(timeseries_file, label_file, indices):
+            """Extract voxel time courses for each subcortical roi index
+            Parameters
+            ----------
+            timeseries_file: a 4D Nifti file
+            label_file: a 3D file containing rois in the same space/size of the 4D file
+            indices: a list of indices for ROIs to extract.
+            Returns
+            -------
+            out_file: a text file containing time courses for each voxel of each roi
+                The first four columns are: freesurfer index, i, j, k positions in the
+                label file
+            """
+            img = nb.load(timeseries_file)
+            data = img.get_data()
+            roiimg = nb.load(label_file)
+            rois = roiimg.get_data()
+            prefix = split_filename(timeseries_file)[1]
+            out_ts_file = os.path.join(os.getcwd(), '%s_subcortical_ts.txt' % prefix)
+            with open(out_ts_file, 'wt') as fp:
+                for fsindex in indices:
+                    ijk = np.nonzero(rois == fsindex)
+                    ts = data[ijk]
+                    for i0, row in enumerate(ts):
+                        fp.write('%d,%d,%d,%d,' % (fsindex, ijk[0][i0],
+                                                   ijk[1][i0], ijk[2][i0]) +
+                                 ','.join(['%.10f' % val for val in row]) + '\n')
+            return out_ts_file
+
+        # Sample the time series file for each subcortical roi
+        ts2txt = MapNode(Function(input_names=['timeseries_file', 'label_file',
+                                               'indices'],
+                                  output_names=['out_file'],
+                                  function=extract_subrois,
+                                  imports=imports),
+                         iterfield=['timeseries_file'],
+                         name='getsubcortts')
+        ts2txt.inputs.indices = [8] + range(10, 14) + [17, 18, 26, 47] +\
+                                range(49, 55) + [58]
+        ts2txt.inputs.label_file = \
+            os.path.abspath(('OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_'
+                             '2mm_v2.nii.gz'))
+        wf.connect(maskts, 'out_file', ts2txt, 'timeseries_file')
+        
+        substitutions = [('_target_subject_', ''),
+                         ('_filtermotart_cleaned_bp_trans_masked', ''),
+                         ('_filtermotart_cleaned_bp', ''),
+                         ]
+        substitutions += [("_smooth%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_ts_masker%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_getsubcortts%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_combiner%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_filtermotion%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_filter_noise_nosmooth%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_makecompcorfilter%d" % i,"") for i in range(11)[::-1]]
+        substitutions += [("_get_aparc_tsnr%d/" % i, "run%d_" % (i + 1)) for i in range(11)[::-1]]
+
+        substitutions += [("T1_out_brain_pve_0_maths_warped", "compcor_csf"),
+                          ("T1_out_brain_pve_1_maths_warped", "compcor_gm"),
+                          ("T1_out_brain_pve_2_maths_warped", "compcor_wm"),
+                          ("output_warped_image_maths", "target_brain_mask"),
+                          ("median_brain_mask", "native_brain_mask"),
+                          ("corr_", "")]
+
+        regex_subs = [('_combiner.*/sar', '/smooth/'),
+                      ('_combiner.*/ar', '/unsmooth/'),
+                      ('_aparc_ts.*/sar', '/smooth/'),
+                      ('_aparc_ts.*/ar', '/unsmooth/'),
+                      ('_getsubcortts.*/sar', '/smooth/'),
+                      ('_getsubcortts.*/ar', '/unsmooth/'),
+                      ('series/sar', 'series/smooth/'),
+                      ('series/ar', 'series/unsmooth/'),
+                      ('_inverse_transform./', ''),
+                      ]
+        # Save the relevant data into an output directory
+        datasink = Node(interface=DataSink(), name="datasink")
+        datasink.inputs.base_directory = sink_directory
+        datasink.inputs.substitutions = substitutions
+        datasink.inputs.regexp_substitutions = regex_subs
+        wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
+        wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
+        wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
+        wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
+        wf.connect(registration, 'outputspec.segmentation_files', datasink, 'mask_files')
+        wf.connect(registration, 'outputspec.anat2target', datasink, 'qa.ants')
+        wf.connect(registration, 'outputspec.mean2anat_mask', datasink, 'mask_files.@brainmask')
+        wf.connect(mask_target, 'out_file', datasink, 'mask_files.target')
+        wf.connect(filter1, 'out_f', datasink, 'qa.compmaps.@mc_F')
+        wf.connect(filter1, 'out_pf', datasink, 'qa.compmaps.@mc_pF')
+        wf.connect(filter2, 'out_f', datasink, 'qa.compmaps')
+        wf.connect(filter2, 'out_pf', datasink, 'qa.compmaps.@p')
+        wf.connect(registration, 'outputspec.min_cost_file', datasink, 'qa.mincost')
+        wf.connect(tsnr, 'tsnr_file', datasink, 'qa.tsnr.@map')
+        wf.connect([(get_roi_tsnr, datasink, [('avgwf_txt_file', 'qa.tsnr'),
+                                              ('summary_file', 'qa.tsnr.@summary')])])
+
+        wf.connect(bandpass, 'out_files', datasink, 'timeseries.@bandpassed')
+        wf.connect(smooth, 'out_file', datasink, 'timeseries.@smoothed')
+        wf.connect(createfilter1, 'out_files',
+                   datasink, 'regress.@regressors')
+        wf.connect(compcor, 'components_file',
+                   datasink, 'regress.@compcorr')
+        wf.connect(maskts, 'out_file', datasink, 'timeseries.target')
+        wf.connect(sampleaparc, 'summary_file',
+                   datasink, 'parcellations.aparc')
+        wf.connect(sampleaparc, 'avgwf_txt_file',
+                   datasink, 'parcellations.aparc.@avgwf')
+        wf.connect(ts2txt, 'out_file',
+                   datasink, 'parcellations.grayo.@subcortical')
+
+        datasink2 = Node(interface=DataSink(), name="datasink2")
+        datasink2.inputs.base_directory = outdir
+        datasink2.inputs.substitutions = substitutions
+        datasink2.inputs.regexp_substitutions = regex_subs
+        wf.connect(combiner, 'out_file',
+                   datasink2, 'parcellations.grayo.@surface')
+        return wf
+
+
 """
 The following functions run the whole workflow.
 """
@@ -1859,6 +1871,9 @@ if __name__ == '__main__':
     # Optional changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
+
+    # View workflow graph
+    #wf.write_graph(graph2use='exec')
     
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
