@@ -47,17 +47,18 @@ def get_taskname(base_dir, task_id):
             if 'task%03d'%(task_id) in info:
                 return info[1]
 
-def get_sub_vars(dataset_dir, task_name, model_id):
+def get_sub_vars(dataset_dir, task_name, model_id, sub_list_file, behav_file, group_contrast_file):
     import numpy as np
     import os
     import pandas as pd
-    sub_list_file = os.path.join(dataset_dir, 'code', 'groups', 'participant_key.txt')
-    behav_file = os.path.join(dataset_dir, 'code', 'groups', 'behav.txt')
-    group_contrast_file = os.path.join(dataset_dir, 'code', 'groups', 'contrasts.txt')
+    import re
+    #sub_list_file = os.path.join(dataset_dir, 'code', 'groups', 'participant_key.txt')
+    #behav_file = os.path.join(dataset_dir, 'code', 'groups', 'behav.txt')
+    #group_contrast_file = os.path.join(dataset_dir, 'code', 'groups', 'contrasts.txt')  
 
     subs_list = pd.read_table(sub_list_file, index_col=0)['task-%s' % task_name]
     subs_needed = subs_list.index[np.nonzero(subs_list)[0]]
-    behav_info = pd.read_table(behav_file, index_col=0)
+    behav_info = pd.read_table(behav_file,  delim_whitespace=True, index_col=0)
 
     missing_subjects = np.setdiff1d(subs_needed, behav_info.index.tolist())
     if len(missing_subjects) > 0:
@@ -69,17 +70,20 @@ def get_sub_vars(dataset_dir, task_name, model_id):
 
     contrasts = []
     for row in contrast_defs:
+        print row
         if 'task-%s' % task_name not in row:
             continue
-        regressor_names = eval('[' + row.split(' [')[1].split(']')[0] + ']')
+        regressor_names =  re.search("\[([\w\s',]+)\]", row).group(1)
+        regressor_names = eval('[' + regressor_names + ']')
+
         for val in regressor_names:
             if val not in behav_info.keys():
                 raise ValueError('Regressor %s not in behav.txt file' % val)
         contrast_name = row.split()[1]
-        contrast_vector = np.array(row.split('] ')[1].rstrip().split()).astype(float).tolist()
+        contrast_vector = np.array(re.search("\]([\s\d]+)", row).group(1).split()).astype(float).tolist()
         con = [tuple([contrast_name, 'T', regressor_names, contrast_vector])]
         contrasts.append(con)
-    
+
     regressors_needed = []
     for idx, con in enumerate(contrasts):
         model_regressor = {}
@@ -109,14 +113,16 @@ def run_palm(cope_file, design_file, contrast_file, group_file, mask_file,
 
 def group_multregress_openfmri(dataset_dir, model_id=None, task_id=None, l1output_dir=None, out_dir=None, 
                                no_reversal=False, plugin=None, plugin_args=None, flamemodel='flame1',
-                               nonparametric=False, use_spm=False):
+                               nonparametric=False, use_spm=False,
+                               sub_list_file=None, behav_file=None, group_contrast_file=None):
 
     meta_workflow = Workflow(name='mult_regress')
     meta_workflow.base_dir = work_dir
     for task in task_id:
         task_name = get_taskname(dataset_dir, task)
         cope_ids = l1_contrasts_num(model_id, task_name, dataset_dir)
-        regressors_needed, contrasts, groups, subj_list = get_sub_vars(dataset_dir, task_name, model_id)
+        regressors_needed, contrasts, groups, subj_list = get_sub_vars(dataset_dir, task_name, model_id,
+                                                                      sub_list_file, behav_file, group_contrast_file)
         for idx, contrast in enumerate(contrasts):
             wk = Workflow(name='model_%03d_task_%03d_contrast_%s' % (model_id, task, contrast[0][0]))
 
@@ -146,6 +152,9 @@ def group_multregress_openfmri(dataset_dir, model_id=None, task_id=None, l1outpu
             wk.connect(info, 'model_id', dg, 'model_id')
             wk.connect(info, 'task_id', dg, 'task_id')
 
+            print '------------'
+            print dg
+            
             model = Node(MultipleRegressDesign(), name='l2model')
             model.inputs.groups = groups
             model.inputs.contrasts = contrasts[idx]
@@ -270,6 +279,18 @@ if __name__ == '__main__':
                         help='tool to use for dicom conversion' + defstr)
     parser.add_argument("--sleep", dest="sleep", default=60., type=float,
                         help="Time to sleep between polls" + defstr)
+    parser.add_argument("-s", "--sub_list_file", dest="sub_list_file",
+                        default=None,
+                        help="sub list file" + defstr)
+    parser.add_argument("-b", "--behav_file", dest="behav_file",
+                        default=None,
+                        help="behav_file " + defstr)
+    parser.add_argument("-g", "--group_contrast_file", dest="group_contrast_file",
+                        default=None,
+                        help="group_contrast_file" + defstr)    
+    parser.add_argument("--crashdump_dir", dest="crashdump_dir",
+                        help="Crashdump dir", default=None)    
+                        
     args = parser.parse_args()
     outdir = args.outdir
     work_dir = os.getcwd()
@@ -293,8 +314,14 @@ if __name__ == '__main__':
                                     no_reversal=args.norev,
                                     flamemodel=args.flamemodel,
                                     nonparametric=args.nonparametric,
-                                    use_spm=args.use_spm)
+                                    use_spm=args.use_spm,
+                                    sub_list_file=args.sub_list_file, 
+                                    behav_file=args.behav_file, 
+                                    group_contrast_file=args.group_contrast_file)
     wf.config['execution']['poll_sleep_duration'] = args.sleep
+    
+    if not (args.crashdump_dir is None):
+        wf.config['execution']['crashdump_dir'] = args.crashdump_dir    
 
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))

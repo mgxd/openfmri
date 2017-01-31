@@ -696,6 +696,7 @@ def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
             n_tasks.append(x)
     conds = []
     run_ids = []
+
     if task not in n_tasks:
         # assume resting
         resting = True
@@ -760,6 +761,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
 
     task_id = args.task
+
 
     # the master workflow, with subject specific inside
     meta_wf = Workflow('meta_level')
@@ -953,6 +955,7 @@ def analyze_bids_dataset(bold_files,
                           name='joiner_notopup')
         wf.connect(realign_run, 'out_file', joiner, 'corrected_bolds')
     
+
     # save motion params regardless of topup
     wf.connect(realign_run, 'par_file', joiner, 'nipy_realign_pars')
 
@@ -1812,6 +1815,7 @@ if __name__ == '__main__':
                         help=("Target in MNI space. Best to use the MindBoggle "
                               "template - only used with FreeSurfer"
                               "OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz"))
+
     parser.add_argument("-ss", dest="session_id", default=None,
                         help="Session id, ex. pre, 2, etc.")
     parser.add_argument("--crashdump_dir", dest="crashdump_dir",
@@ -1824,6 +1828,7 @@ if __name__ == '__main__':
                         help="Activate nipype debug mode" + defstr)
     parser.add_argument('--cc', action="store_true",
                         help="CompCor correction for task analysis" + defstr)
+
     args = parser.parse_args()
     
     data_dir = os.path.abspath(args.datasetdir)
@@ -1869,4 +1874,9 @@ if __name__ == '__main__':
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
+        #wf.run('SLURM', plugin_args={'sbatch_args': '-p om_interactive -N1 -c1','max_jobs':40}) 
         wf.run(args.plugin)
+
+
+
+
