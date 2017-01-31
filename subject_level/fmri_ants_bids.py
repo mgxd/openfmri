@@ -39,6 +39,7 @@ from nipype.interfaces.c3 import C3dAffineTool
 from nipype.workflows.fmri.fsl import (create_modelfit_workflow,
                                        create_fixed_effects_flow)
 import numpy as np
+from bids.grabbids import BIDSLayout
 
 version = 0
 if fsl.Info.version() and \
@@ -339,6 +340,7 @@ def create_fs_reg_workflow(name='registration'):
     bbregister.inputs.contrast_type = 't2'
     bbregister.inputs.out_fsl_file = True
     bbregister.inputs.epi_mask = True
+    bbregister.inputs.registered_file = True
     register.connect(inputnode, 'subject_id', bbregister, 'subject_id')
     register.connect(inputnode, 'mean_image', bbregister, 'source_file')
     register.connect(inputnode, 'subjects_dir', bbregister, 'subjects_dir')
@@ -656,7 +658,7 @@ def create_topup_workflow(num_slices, readout,
     topup.connect(applytopup, 'out_corrected', outputnode, 'applytopup_corrected')
     return topup
 
-def get_subjectinfo(subject_id, base_dir, taskname, model_id, session_id=None):
+def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
     """Get info for a given subject
     Parameters
     ----------
@@ -678,17 +680,15 @@ def get_subjectinfo(subject_id, base_dir, taskname, model_id, session_id=None):
         Repetition time
     """
     condition_info = []
-    cond_file = os.path.join(base_dir, 'code', 'model', 'model%03d' % model_id,
+    cond_file = os.path.join(base_dir, 'code', 'model', 'model%03d' % model,
                                  'condition_key.txt')
-    task = 'task-{}'.format(taskname)
+    task = 'task-{}'.format(task_id)
     with open(cond_file, 'rt') as fp:
         for line in fp:
             info = line.strip().split()
             condition_info.append([info[0], info[1], ' '.join(info[2:])])
-    
     if len(condition_info) == 0:
         raise ValueError('No condition info found in %s' % cond_file)
-        
     taskinfo = np.array(condition_info)
     n_tasks = []
     for x in taskinfo[:, 0]:
@@ -697,47 +697,30 @@ def get_subjectinfo(subject_id, base_dir, taskname, model_id, session_id=None):
     conds = []
     run_ids = []
     if task not in n_tasks:
-        raise ValueError('Task id %s does not exist' % task)
-    for idx,taskname in enumerate(n_tasks):
-        taskidx = np.where(taskinfo[:, 0] == '%s'%(taskname))
-        conds.append([condition.replace(' ', '_') for condition
-                      in taskinfo[taskidx[0], 2]])
-        if session_id:
-            files = sorted(glob(os.path.join(base_dir,
-                                             subject_id,
-                                             session_id,
-                                             'func',
-                                             '*%s*.nii.gz'%(task))))
-        else:
-            files = sorted(glob(os.path.join(base_dir,
-                                             subject_id,
-                                             'func',
-                                             '*%s*.nii.gz'%(task))))
-            
-        try:
-            runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
-        except AttributeError:
-            runs = [int(re.search('(?<=run)\d+',os.path.basename(val)).group(0)) for val in files]
-        run_ids.insert(idx, runs)
-    if session_id:
-        json_info = glob(os.path.join(base_dir, subject_id, session_id, 
-                                      'func','*%s*.json'%(task)))[0]
-    else:    
-        json_info = glob(os.path.join(base_dir, subject_id, 'func',
-                                     '*%s*.json'%(task)))[0]
-    if os.path.exists(json_info):
-        import json
-        with open(json_info, 'rt') as fp:
-            data = json.load(fp)
-            TR = data['RepetitionTime']
-            slice_times = data['SliceTiming']
+        # assume resting
+        resting = True
     else:
-        task_scan_key = os.path.join(base_dir, 'code', 'scan_key.txt')
-        if os.path.exists(task_scan_key):
-            TR = np.genfromtxt(task_scan_key)[1]
-        else:
-            TR = np.genfromtxt(os.path.join(base_dir, 'scan_key.txt'))[1]
-    return run_ids[0], conds[n_tasks.index(task)], TR, slice_times
+        for idx,taskname in enumerate(n_tasks):
+            taskidx = np.where(taskinfo[:, 0] == '%s'%(taskname))
+            conds.append([condition.replace(' ', '_') for condition
+                          in taskinfo[taskidx[0], 2]])
+    # files
+    files = sorted([f.filename for f in 
+              layout.get(subject=subj.replace('sub-',''),
+              type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
+    print(files)
+    
+    runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
+    if not runs:
+        runs = [1]
+
+    meta = layout.get_metadata(files[0])
+    TR, slice_times = meta['RepetitionTime'], meta['SliceTiming']
+    
+    if resting:
+        return files, runs, TR, slice_times
+    else:
+        return files, runs, conds[n_tasks.index(task)], TR, slice_times
 
 def get_topup_info(layout, bold_files):
     """
@@ -783,29 +766,28 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
     print(subjs_to_analyze)
     for subj_label in subjs_to_analyze: #replacing infosource
-        from bids.grabbids import BIDSLayout
         layout = BIDSLayout(bids_dir)
         
         if task_id not in layout.get_tasks():
-            print('task-{} is not found in your dataset'.format(task_id))
+            raise ValueError('task-{} is not found in your dataset'.format(task_id))
             return
 
         if not args.resting:
-        # remove lowpass filter if doing task analysis
+            # remove lowpass filter if doing task analysis
             args.lpfilter = -1
-
-        run_id, conds, TR, slice_times = get_subjectinfo(subj_label, bids_dir, 
-                                                         task_id, args.model)
-        # replacing datasource
-        bold_files = sorted([f.filename for f in 
-                      layout.get(subject = subj_label.replace('sub-',''),
-                      type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
+            bold_files, runs, TR, slice_times = get_subjectinfo(
+                                                        layout, bids_dir, 
+                                                        task_id, args.model)
+        else:
+            bold_files, runs, conds, TR, slice_times = get_subjectinfo(
+                                                        layout, bids_dir, 
+                                                        task_id, args.model)
 
         anat = [f.filename for f in 
                 layout.get(subject = subj_label.replace('sub-',''),
                 type='T1w', extensions=['nii.gz', 'nii'])][0]
 
-        #use events.tsv eventually
+        # until BIDS decides on modeling, use old gablab style
         behav = None
         if not args.resting:
             behav = [x for x in glob(
@@ -1874,7 +1856,7 @@ if __name__ == '__main__':
     #wf.config['execution']['poll_sleep_duration'] = 2
 
     # View workflow graph
-    #wf.write_graph(graph2use='exec')
+    #wf.write_graph(graph2use='flat')
 
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
