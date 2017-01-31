@@ -34,7 +34,7 @@ from nipype.utils.filemanip import filename_to_list, list_to_filename
 from nipype.interfaces.io import DataSink, FreeSurferSource
 import nipype.algorithms.modelgen as model
 import nipype.algorithms.rapidart as ra
-from nipype.algorithms.confounds import TSNR
+from nipype.algorithms.confounds import TSNR, CompCor
 from nipype.interfaces.c3 import C3dAffineTool
 from nipype.workflows.fmri.fsl import (create_modelfit_workflow,
                                        create_fixed_effects_flow)
@@ -775,13 +775,14 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         if not args.resting:
             # remove lowpass filter if doing task analysis
             args.lpfilter = -1
-            bold_files, runs, TR, slice_times = get_subjectinfo(
-                                                        layout, bids_dir, 
+            bold_files, runs, conds, TR, slice_times = get_subjectinfo(
+                                                        layout, bids_dir, subj_label, 
                                                         task_id, args.model)
         else:
-            bold_files, runs, conds, TR, slice_times = get_subjectinfo(
-                                                        layout, bids_dir, 
+            bold_files, runs, TR, slice_times = get_subjectinfo(
+                                                        layout, bids_dir, subj_label,
                                                         task_id, args.model)
+            conds = None
 
         anat = [f.filename for f in 
                 layout.get(subject = subj_label.replace('sub-',''),
@@ -809,10 +810,11 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fs_dir=fs_dir,
                       conds=conds,
                       comp_cor=args.cc,
-                      run_id=run_id,
+                      run_id=runs,
                       highpass_freq=args.hpfilter,
                       lowpass_freq=args.lpfilter,
                       fwhm=args.fwhm,
+                      surf_fwhm=args.surf_fwhm,
                       contrast=contrast_file,
                       use_derivatives=derivatives,
                       outdir=os.path.join(outdir, 'task-{}'.format(task_id)), 
@@ -850,7 +852,8 @@ def analyze_bids_dataset(bold_files,
                          run_id=None,
                          highpass_freq=0.01,
                          lowpass_freq=0.1, 
-                         fwhm=6., 
+                         fwhm=6.,
+                         surf_fwhm=15., 
                          contrast=None,
                          use_derivatives=True,
                          num_slices=None,
@@ -1051,10 +1054,13 @@ def analyze_bids_dataset(bold_files,
                              output_names=['out_files'],
                              function=bandpass_filter,
                              imports=imports),
-                    name='bandpass_unsmooth')
+                    name='bandpass')
     bandpass.inputs.fs = 1. / TR
     bandpass.inputs.highpass_freq = highpass_freq
     bandpass.inputs.lowpass_freq = lowpass_freq
+
+    smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
+    smooth.inputs.fwhm = fwhm
 
     #########################
     # Preprocessing for event
@@ -1071,14 +1077,12 @@ def analyze_bids_dataset(bold_files,
         
         # find median value of run (NOTE: different medians if no topup)
         medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
-                            iterfield=['in_file'],
+                            iterfield=['in_file', 'mask_file'],
                             name='medianval')
         wf.connect(realign_all, 'out_file', medianval, 'in_file')
         wf.connect(maskfunc, 'out_file', medianval, 'mask_file')
 
         # smooth func files
-        smooth = MapNode(interface=fsl.IsotropicSmooth(), name="smooth", iterfield=["in_file"])
-        smooth.inputs.fwhm = fwhm
         wf.connect(maskfunc, 'out_file', smooth, 'in_file')
 
         def getmeanscale(medianvals):
@@ -1094,23 +1098,24 @@ def analyze_bids_dataset(bold_files,
         # Bandpass filters before registration
         wf.connect(meanscale, 'out_file', bandpass, 'files')
 
-        if version > 507:
+        if version < 507:
+            wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
+        else:
             #Add back the mean removed by the highpass filter operation as of FSL 5.0.7
-            meanfunc4 = MapNode(interface=fsl.ImageMaths(op_string='-Tmean',
+            meanfunc = MapNode(interface=fsl.ImageMaths(op_string='-Tmean',
                                                          suffix='_mean'),
                                 iterfield=['in_file'],
-                             name='meanfunc4')
-            wf.connect(meanscale, 'out_file', meanfunc4, 'in_file')
+                             name='meanfunc')
+            wf.connect(meanscale, 'out_file', meanfunc, 'in_file')
         
             addmean = MapNode(interface=fsl.BinaryMaths(operation='add'),
                               iterfield=['in_file', 'operand_file'],
                               name='addmean')
             wf.connect(bandpass, 'out_files', addmean, 'in_file')
-            wf.connect(meanfunc4, 'out_file', addmean, 'operand_file')
+            wf.connect(meanfunc, 'out_file', addmean, 'operand_file')
             # once mean is added back - pass in to modelfit
             wf.connect(addmean, 'out_file', modelfit, 'inputspec.functional_data')
-        else: # older FSL doesn't remove mean
-            wf.connect(bandpass, 'out_files', modelfit, 'inputspec.functional_data')
+
         modelfit.inputs.inputspec.bases = {'dgamma': {'derivs': use_derivatives}}
         modelfit.inputs.inputspec.model_serial_correlations = True
         modelfit.inputs.inputspec.film_threshold = 1000
@@ -1524,16 +1529,17 @@ def analyze_bids_dataset(bold_files,
     # RESTING
     #########
     else: # no onsets
+        
+        target_subject = ['fsaverage3', 'fsaverage4']
+        #bandpass_rs = bandpass.clone(name='bp_rs')
+        wf.connect(filter2, 'out_res', smooth, 'in_file')
 
-        bandpass_rs = bandpass.clone(name='bp_rs')
-        wf.connect(filter2, 'out_res', smooth_rs, 'in_file')
-
-        smooth_rs = smooth.clone(name="smooth_rs")
-        wf.connect(smooth_rs, 'out_file', bandpass_rs, 'files')
+        #smooth_rs = smooth.clone(name="smooth_rs")
+        wf.connect(smooth, 'out_file', bandpass, 'files')
 
         collector = Node(Merge(2), name='collect_streams')
-        wf.connect(smooth_rs, 'out_file', collector, 'in1')
-        wf.connect(bandpass_rs, 'out_files', collector, 'in2')
+        wf.connect(smooth, 'out_file', collector, 'in1')
+        wf.connect(bandpass, 'out_files', collector, 'in2')
 
         """
         Transform the remaining images. First to anatomical and then to target
@@ -1562,7 +1568,7 @@ def analyze_bids_dataset(bold_files,
         wf.connect(mask_target, 'out_file', maskts, 'mask_file')
 
             # Sample the average time series in aparc ROIs
-        sampleaparc = MapNode(freesurfer.SegStats(default_color_table=True),
+        sampleaparc = MapNode(fs.SegStats(default_color_table=True),
                               iterfield=['in_file', 'summary_file',
                                          'avgwf_txt_file'],
                               name='aparc_ts')
@@ -1720,7 +1726,7 @@ def analyze_bids_dataset(bold_files,
                       ]
         # Save the relevant data into an output directory
         datasink = Node(interface=DataSink(), name="datasink")
-        datasink.inputs.base_directory = sink_directory
+        datasink.inputs.base_directory = outdir
         datasink.inputs.substitutions = substitutions
         datasink.inputs.regexp_substitutions = regex_subs
         wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
@@ -1786,7 +1792,9 @@ if __name__ == '__main__':
                         help=("Low pass frequency (Hz) - removed for" 
                              " task analysis" + defstr))
     parser.add_argument('--fwhm', default=6.,
-                        type=float, help="Spatial FWHM" + defstr)
+                        type=float, help="Volume FWHM" + defstr)
+    parser.add_argument('--surf_fwhm', default=15., type=float,
+                        help="Surface FWHM" + defstr)
     parser.add_argument('--derivatives', action="store_true",
                         help="Use derivatives" + defstr)
     parser.add_argument("-o", "--output_dir", dest="outdir",
