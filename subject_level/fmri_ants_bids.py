@@ -772,7 +772,6 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         
         if task_id not in layout.get_tasks():
             raise ValueError('task-{} is not found in your dataset'.format(task_id))
-            return
 
         if not args.resting:
             # remove lowpass filter if doing task analysis
@@ -818,6 +817,8 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                       fwhm=args.fwhm,
                       surf_fwhm=args.surf_fwhm,
                       contrast=contrast_file,
+                      sparse=args.sparse,
+                      TA=args.TA,
                       use_derivatives=derivatives,
                       outdir=os.path.join(outdir, 'task-{}'.format(task_id)), 
                       name=name)
@@ -864,7 +865,9 @@ def analyze_bids_dataset(bold_files,
                          topup_AP=None,
                          topup_PA=None,
                          readout_topup=None,
-                         outdir=None, 
+                         outdir=None,
+                         sparse=None,
+                         TA=None,
                          name='tfmri'):
     
     # Initialize subject workflow and import others
@@ -1315,12 +1318,17 @@ def analyze_bids_dataset(bold_files,
         reshape_behav.inputs.run_id = run_id
         reshape_behav.inputs.conds = conds
 
-        modelspec = Node(model.SpecifyModel(),
-                         name="modelspec")
+        if sparse:
+        	modelspec = Node(model.SpecifySparseModel(), name="modelspec")
+        	modelspec.inputs.model_hrf = True
+        	modelspec.inputs.stimuli_as_impulses = False
+        	modelspec.inputs.time_acquisition = TA
+        else:
+        	modelspec = Node(model.SpecifyModel(), name="modelspec")
+
         modelspec.inputs.input_units = 'secs'
         modelspec.inputs.time_repetition = TR
-        # in seconds
-        modelspec.inputs.high_pass_filter_cutoff = (1./highpass_freq)
+        modelspec.inputs.high_pass_filter_cutoff = (1./highpass_freq) #Hz to sec
 
         # bold model connections
         wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
@@ -1828,6 +1836,11 @@ if __name__ == '__main__':
                         help="Activate nipype debug mode" + defstr)
     parser.add_argument('--cc', action="store_true",
                         help="CompCor correction for task analysis" + defstr)
+    parser.add_argument('--sparse', action="store_true",
+    					help="Sparse model specification" + defstr)
+    parser.add_argument('-ta', dest="TA", default=None, type=float,
+    					help=("Time in seconds to acquire a single image volume"
+    						  " (Required for sparse models"))
 
     args = parser.parse_args()
     
@@ -1874,9 +1887,4 @@ if __name__ == '__main__':
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
-        #wf.run('SLURM', plugin_args={'sbatch_args': '-p om_interactive -N1 -c1','max_jobs':40}) 
         wf.run(args.plugin)
-
-
-
-
