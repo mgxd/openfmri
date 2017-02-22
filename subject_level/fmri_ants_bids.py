@@ -1836,10 +1836,11 @@ if __name__ == '__main__':
                         help="Activate nipype debug mode" + defstr)
     parser.add_argument('--cc', action="store_true",
                         help="CompCor correction for task analysis" + defstr)
-    parser.add_argument('--sparse', action="store_true",
-    					help="Sparse model specification" + defstr)
-    parser.add_argument('-ta', dest="TA", default=None, type=float,
-    					help=("Time in seconds to acquire a single image volume"
+    sparser = parser.add_argument_group('Sparse model inputs')
+    sparser.add_argument('--sparse', action="store_true",
+    					 help="Sparse model specification" + defstr)
+    sparser.add_argument('-ta', dest="TA", default=None, type=float,
+    					 help=("Time in seconds to acquire a single image volume"
     						  " (Required for sparse models"))
 
     args = parser.parse_args()
