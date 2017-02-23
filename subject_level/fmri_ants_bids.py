@@ -709,7 +709,13 @@ def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
     files = sorted([f.filename for f in 
               layout.get(subject=subj.replace('sub-',''),
               type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
-    print(files)
+    print(files) # good debugger
+
+    # no task files found for subject
+    if not files:
+        if resting:
+            return None, None, None, None
+        return None, None, None, None, None
     
     runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
     if not runs:
@@ -784,10 +790,15 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
                                                         layout, bids_dir, subj_label,
                                                         task_id, args.model)
             conds = None
+        
+        if not bold_files: #skip subjects with missing tasks
+            continue
 
-        anat = [f.filename for f in 
-                layout.get(subject = subj_label.replace('sub-',''),
-                type='T1w', extensions=['nii.gz', 'nii'])][0]
+        anat = None
+        if not fs_dir:
+            anat = [f.filename for f in 
+                    layout.get(subject = subj_label.replace('sub-',''),
+                    type='T1w', extensions=['nii.gz', 'nii'])][0]
 
         # until BIDS decides on modeling, use old gablab style
         behav = None
