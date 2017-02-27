@@ -1323,7 +1323,7 @@ def analyze_bids_dataset(bold_files,
                 behav = [behav]
             behav_array = np.array(behav).flatten()
             num_elements = behav_array.shape[0]
-            return behav_array.reshape(num_elements/num_conds, num_conds).tolist()
+            return behav_array.reshape(num_elements//num_conds, num_conds).tolist()
 
         reshape_behav = Node(Function(input_names=['behav', 'run_id', 'conds'],
                                       output_names=['behav'],
