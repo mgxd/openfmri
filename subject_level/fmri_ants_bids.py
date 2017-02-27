@@ -709,7 +709,7 @@ def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
     files = sorted([f.filename for f in 
               layout.get(subject=subj.replace('sub-',''),
               type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
-    print(files) # good debugger
+    #print(files) # good debugger
 
     # no task files found for subject
     if not files:
@@ -772,7 +772,6 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
     # the master workflow, with subject specific inside
     meta_wf = Workflow('meta_level')
 
-    print(subjs_to_analyze)
     for subj_label in subjs_to_analyze: #replacing infosource
         layout = BIDSLayout(bids_dir)
         
