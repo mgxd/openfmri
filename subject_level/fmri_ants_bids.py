@@ -1196,7 +1196,7 @@ def analyze_bids_dataset(bold_files,
                     outlier_val = np.empty((0))
                 for index in np.atleast_1d(outlier_val):
                     outlier_vector = np.zeros((out_params.shape[0], 1))
-                    outlier_vector[index] = 1
+                    outlier_vector[int(index)] = 1
                     out_params = np.hstack((out_params, outlier_vector))
                 if detrend_poly:
                     timepoints = out_params.shape[0]
