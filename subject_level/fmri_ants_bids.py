@@ -806,6 +806,11 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             behav = [x for x in glob(
                     os.path.join(old_model_dir, 'onsets', subj_label,
                                  'task-{}*'.format(task_id), 'cond*.txt'))]
+            # task but missing behav
+            if not behav:
+                print('{} missing onsets and will be excluded from analysis').format(subj_label)
+                continue
+                
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
 
