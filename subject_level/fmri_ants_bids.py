@@ -1362,8 +1362,8 @@ def analyze_bids_dataset(bold_files,
             n_runs = len(copes)
             all_copes = np.array(copes).flatten()
             all_varcopes = np.array(varcopes).flatten()
-            outcopes = all_copes.reshape(len(all_copes)/num_copes, num_copes).T.tolist()
-            outvarcopes = all_varcopes.reshape(len(all_varcopes)/num_copes, num_copes).T.tolist()
+            outcopes = all_copes.reshape(len(all_copes)//num_copes, num_copes).T.tolist()
+            outvarcopes = all_varcopes.reshape(len(all_varcopes)//num_copes, num_copes).T.tolist()
             return outcopes, outvarcopes, n_runs
 
         cope_sorter = Node(Function(input_names=['copes', 'varcopes',
