@@ -1050,10 +1050,10 @@ def analyze_bids_dataset(bold_files,
             F = np.zeros((timepoints))
             lowidx = int(timepoints / 2) + 1
             if lowpass_freq > 0:
-                lowidx = np.round(float(lowpass_freq) / fs * timepoints)
+                lowidx = int(np.round(float(lowpass_freq) / fs * timepoints))
             highidx = 0
             if highpass_freq > 0:
-                highidx = np.round(float(highpass_freq) / fs * timepoints)
+                highidx = int(np.round(float(highpass_freq) / fs * timepoints))
             F[highidx:lowidx] = 1
             F = ((F + F[::-1]) > 0).astype(int)
             data = img.get_data()
