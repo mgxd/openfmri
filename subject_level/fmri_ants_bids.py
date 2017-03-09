@@ -546,7 +546,7 @@ def create_topup_workflow(num_slices, readout,
     topup2median.inputs.dof = 6
     topup2median.inputs.out_matrix_file = 'orig2median'
 
-    applyxfm = Node(fsl.ApplyXfm(out_file='opp2median.nii.gz', apply_xfm=True, 
+    applyxfm = Node(fsl.ApplyXFM(out_file='opp2median.nii.gz', apply_xfm=True, 
                                  interp='spline', output_type='NIFTI_GZ'),
                     name='applyxfm')        
     topup.connect(topup2median, 'out_matrix_file', applyxfm, 'in_matrix_file')
@@ -1896,6 +1896,7 @@ if __name__ == '__main__':
     # Optional changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
+    wf.config['execution']['job_finished_timeout'] = 60
 
     # View workflow graph
     #wf.write_graph(graph2use='flat')
