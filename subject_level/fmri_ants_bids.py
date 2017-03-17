@@ -156,7 +156,7 @@ def create_reg_workflow(name='registration'):
     """
     Create a mask of the median image coregistered to the anatomical image
     """
-    
+
     mean2anat_mask = Node(fsl.BET(mask=True), name='mean2anat_mask')
     register.connect(mean2anatbbr, 'out_file', mean2anat_mask, 'in_file')
 
@@ -294,10 +294,10 @@ def create_fs_reg_workflow(name='registration'):
         outputspec.func2anat_transform : FLIRT transform
         outputspec.anat2target_transform : FLIRT+FNIRT transform
         outputspec.transformed_mean : mean image in target space
-        outputspec.out_reg_file : 
-        outputspec.segmentation_files : 
-        outputspec.aparc : 
-        outputspec.min_cost_file : 
+        outputspec.out_reg_file :
+        outputspec.segmentation_files :
+        outputspec.aparc :
+        outputspec.min_cost_file :
     """
 
     register = Workflow(name=name)
@@ -463,7 +463,7 @@ def create_fs_reg_workflow(name='registration'):
     register.connect(inputnode, 'target_image', warpmean, 'reference_image')
     register.connect(inputnode, 'mean_image', warpmean, 'input_image')
     register.connect(merge, 'out', warpmean, 'transforms')
-    
+
     """
     Transform the remaining images. First to anatomical and then to target
     """
@@ -502,9 +502,9 @@ def create_fs_reg_workflow(name='registration'):
                      outputnode, 'mean2anat_mask')
     return register
 
-def create_topup_workflow(num_slices, readout, 
+def create_topup_workflow(num_slices, readout,
                           readout_topup, name='topup'):
-    """Create a geometric distortion correction workflow using TOPUP 
+    """Create a geometric distortion correction workflow using TOPUP
     Parameters
     ----------
     name : name of workflow (default: 'topup')
@@ -518,9 +518,9 @@ def create_topup_workflow(num_slices, readout,
         outputspec.topup_encoding_file : acquisition parameter text file for TOPUP files
         outputspec.rest_encoding_file : acquisition parameter text file for rest file
         outputspec.topup_fieldcoef : spline coefficients encoding the off-resonance field
-        outputspec.topup_movpar : TOPUP movement parameters output file 
+        outputspec.topup_movpar : TOPUP movement parameters output file
         outputspec.topup_corrected : corrected TOPUP file
-        outputspec.applytopup_corrected : corrected resting state time series 
+        outputspec.applytopup_corrected : corrected resting state time series
     """
 
     topup = Workflow(name=name)
@@ -540,22 +540,22 @@ def create_topup_workflow(num_slices, readout,
                                                 'applytopup_corrected']),
                       name='outputspec')
 
-    topup2median = Node(fsl.FLIRT(out_file='orig2median.nii.gz', 
+    topup2median = Node(fsl.FLIRT(out_file='orig2median.nii.gz',
                                   output_type='NIFTI_GZ', interp='spline'),
                         name='orig2median')
     topup2median.inputs.dof = 6
     topup2median.inputs.out_matrix_file = 'orig2median'
 
-    applyxfm = Node(fsl.ApplyXFM(out_file='opp2median.nii.gz', apply_xfm=True, 
+    applyxfm = Node(fsl.ApplyXFM(out_file='opp2median.nii.gz', apply_xfm=True,
                                  interp='spline', output_type='NIFTI_GZ'),
-                    name='applyxfm')        
+                    name='applyxfm')
     topup.connect(topup2median, 'out_matrix_file', applyxfm, 'in_matrix_file')
 
     make_topup_list = Node(Merge(2), name='make_topup_list')
     topup.connect(topup2median, 'out_file', make_topup_list, 'in1')
     topup.connect(applyxfm, 'out_file', make_topup_list, 'in2')
 
-    merge_topup = Node(fsl.Merge(dimension='t', output_type='NIFTI_GZ'), 
+    merge_topup = Node(fsl.Merge(dimension='t', output_type='NIFTI_GZ'),
                         name='merge_topup')
     topup.connect(make_topup_list, 'out', merge_topup, 'in_files')
 
@@ -567,8 +567,8 @@ def create_topup_workflow(num_slices, readout,
         elif (pe == 'j-') or not pe:
             direction = -1
         filename = os.path.join(os.getcwd(), 'acq_param_%s.txt' % fname)
-        with open(filename, 'w') as f:  
-            f.writelines(['0 %d 0 %s\n' % (direction, readout),    
+        with open(filename, 'w') as f:
+            f.writelines(['0 %d 0 %s\n' % (direction, readout),
                           '0 %d 0 %s\n' % (direction * -1, readout)])
         return filename
 
@@ -581,14 +581,14 @@ def create_topup_workflow(num_slices, readout,
     file_writer_topup.inputs.fname = 'topup'
     topup.connect(inputnode, 'phase_encoding', file_writer_topup, 'pe')
 
-    run_topup = Node(fsl.TOPUP(out_corrected='b0correct.nii.gz', numprec='float', 
-                        config='b02b0.cnf', output_type='NIFTI_GZ'), 
+    run_topup = Node(fsl.TOPUP(out_corrected='b0correct.nii.gz', numprec='float',
+                        config='b02b0.cnf', output_type='NIFTI_GZ'),
                     name='run_topup')
     topup.connect(file_writer_topup, 'encoding_file', run_topup, 'encoding_file')
 
     applytopup = Node(fsl.ApplyTOPUP(output_type='NIFTI_GZ'), name='applytopup')
     applytopup.inputs.in_index = [1]
-    applytopup.inputs.method = 'jac'   
+    applytopup.inputs.method = 'jac'
 
     file_writer_ts = file_writer_topup.clone(name='file_writer_ts')
     file_writer_ts.inputs.readout = readout
@@ -600,17 +600,17 @@ def create_topup_workflow(num_slices, readout,
     topup.connect(run_topup, 'out_fieldcoef', applytopup, 'in_topup_fieldcoef')
     topup.connect(run_topup, 'out_movpar', applytopup, 'in_topup_movpar')
 
-    if num_slices % 2 != 0:    
+    if num_slices % 2 != 0:
 
-        rm_slice_ts = Node(fsl.ExtractROI(), name='rm_slice_ts')        
+        rm_slice_ts = Node(fsl.ExtractROI(), name='rm_slice_ts')
         rm_slice_ts.inputs.crop_list = [(0,-1), (0,-1), (0, num_slices-1), (0,-1)]
 
-        rm_slice_ref = Node(fsl.ExtractROI(), name='rm_slice_ref') 
+        rm_slice_ref = Node(fsl.ExtractROI(), name='rm_slice_ref')
         rm_slice_ref.inputs.crop_list = [(0,-1),(0,-1),(0, num_slices-1),(0,1)]
 
-        extract_main = rm_slice_ref.clone(name='extract_main') 
+        extract_main = rm_slice_ref.clone(name='extract_main')
 
-        extract_opp = extract_main.clone(name='extract_opp')  
+        extract_opp = extract_main.clone(name='extract_opp')
 
         topup.connect([(inputnode, rm_slice_ts, [('realigned_files', 'in_file')]),
                      (rm_slice_ts, applytopup, [('roi_file', 'in_files')]),
@@ -624,11 +624,11 @@ def create_topup_workflow(num_slices, readout,
                      (inputnode, topup2median, [('ref_file', 'reference')]),
                      (inputnode, applyxfm, [('ref_file', 'reference')])])
 
-        extract_main = Node(fsl.ExtractROI(), name='extract_main') 
+        extract_main = Node(fsl.ExtractROI(), name='extract_main')
         extract_main.inputs.crop_list = [(0,-1), (0,-1), (0,-1), (0,1)]
 
         extract_opp = extract_main.clone(name='extract_opp')
-    
+
     def check_topup_dir(tAP, tPA, pe):
         """ Helper Function to return orig and opposite fieldmaps """
         if pe == 'j':
@@ -706,7 +706,7 @@ def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
             conds.append([condition.replace(' ', '_') for condition
                           in taskinfo[taskidx[0], 2]])
     # files
-    files = sorted([f.filename for f in 
+    files = sorted([f.filename for f in
               layout.get(subject=subj.replace('sub-',''),
               type='bold', task=task_id, extensions=['nii.gz', 'nii'])])
     #print(files) # good debugger
@@ -716,14 +716,14 @@ def get_subjectinfo(layout, base_dir, subj, task_id, model, resting=False):
         if resting:
             return None, None, None, None
         return None, None, None, None, None
-    
+
     runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
     if not runs:
         runs = [1]
 
     meta = layout.get_metadata(files[0])
     TR, slice_times = meta['RepetitionTime'], meta['SliceTiming']
-    
+
     if resting:
         return files, runs, TR, slice_times
     else:
@@ -745,7 +745,7 @@ def get_topup_info(layout, bold_files):
             readout_topup = layout.get_metadata(fmap)['TotalReadoutTime']
     # metainfo (all the same)
     orig_info = layout.get_metadata(bold_files[0])
-    num_slices, readout = (orig_info['dcmmeta_shape'][2], 
+    num_slices, readout = (orig_info['dcmmeta_shape'][2],
                 (orig_info['dcmmeta_shape'][0] - 1) * orig_info['EffectiveEchoSpacing'])
     # keep track of directions
     pe_key = [layout.get_metadata(bold)['PhaseEncodingDirection'] for bold in bold_files]
@@ -761,7 +761,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         subj_dirs = sorted(glob(os.path.join(bids_dir, 'sub-*')))
         subjs_to_analyze = [subj_dir.split(os.sep)[-1] for subj_dir in subj_dirs]
 
-    old_model_dir = os.path.join(os.path.join(bids_dir, 'code', 'model', 
+    old_model_dir = os.path.join(os.path.join(bids_dir, 'code', 'model',
                                               'model{:0>3d}'.format(args.model)))
 
     contrast_file = os.path.join(old_model_dir, 'task_contrasts.txt')
@@ -774,7 +774,7 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
 
     for subj_label in subjs_to_analyze: #replacing infosource
         layout = BIDSLayout(bids_dir)
-        
+
         if task_id not in layout.get_tasks():
             raise ValueError('task-{} is not found in your dataset'.format(task_id))
 
@@ -782,20 +782,20 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             # remove lowpass filter if doing task analysis
             args.lpfilter = -1
             bold_files, runs, conds, TR, slice_times = get_subjectinfo(
-                                                        layout, bids_dir, subj_label, 
+                                                        layout, bids_dir, subj_label,
                                                         task_id, args.model)
         else:
             bold_files, runs, TR, slice_times = get_subjectinfo(
                                                         layout, bids_dir, subj_label,
                                                         task_id, args.model)
             conds = None
-        
+
         if not bold_files: #skip subjects with missing tasks
             continue
 
         anat = None
         if not fs_dir:
-            anat = [f.filename for f in 
+            anat = [f.filename for f in
                     layout.get(subject = subj_label.replace('sub-',''),
                     type='T1w', extensions=['nii.gz', 'nii'])][0]
 
@@ -809,82 +809,45 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
             if not behav:
                 print('{} missing onsets and will be excluded from analysis').format(subj_label)
                 continue
-                
+
 
         name = '{sub}_task-{task}'.format(sub=subj_label, task=task_id)
 
         # until slice timing is fixed, don't use
-        kwargs = dict(bold_files=bold_files,
-                      anat=anat,
-                      target_file=args.target_file,
-                      subject_id=subj_label,
-                      task_id=task_id,
-                      model_id=args.model,
-                      TR=TR,
-                      slice_times=None,
-                      behav=behav,
-                      fs_dir=fs_dir,
-                      conds=conds,
-                      comp_cor=args.cc,
-                      run_id=runs,
-                      highpass_freq=args.hpfilter,
-                      lowpass_freq=args.lpfilter,
-                      fwhm=args.fwhm,
-                      surf_fwhm=args.surf_fwhm,
-                      contrast=contrast_file,
-                      sparse=args.sparse,
-                      TA=args.TA,
+        kwargs = dict(bold_files=bold_files, anat=anat, subject_id=subj_label,
+                      target_file=args.target_file, task_id=task_id, TR=TR,
+                      model_id=args.model, slice_times=None, behav=behav,
+                      fs_dir=fs_dir, conds=conds, comp_cor=args.cc, run_id=runs,
+                      highpass_freq=args.hpfilter, lowpass_freq=args.lpfilter,
+                      fwhm=args.fwhm, surf_fwhm=args.surf_fwhm, TA=args.TA,
+                      contrast=contrast_file, sparse=args.sparse,
                       use_derivatives=derivatives,
-                      outdir=os.path.join(outdir, 'task-{}'.format(task_id)), 
+                      outdir=os.path.join(outdir, 'task-{}'.format(task_id)),
                       name=name)
         # add flag for topup
         if args.topup:
-            (num_slices, pe_key, readout, 
+            (num_slices, pe_key, readout,
             topup_AP, topup_PA, readout_topup) = get_topup_info(layout,
                                                                 bold_files)
-            topup_kwargs = dict(num_slices=num_slices,
-                                pe_key=pe_key,
-                                readout=readout,
-                                topup_AP=topup_AP,
-                                topup_PA=topup_PA,
-                                readout_topup=readout_topup)
+            topup_kwargs = dict(num_slices=num_slices, pe_key=pe_key,
+                                readout=readout, topup_AP=topup_AP,
+                                topup_PA=topup_PA, readout_topup=readout_topup)
 
             kwargs = dict(kwargs.items() + topup_kwargs.items())
-                      
+
         wf = analyze_bids_dataset(**kwargs)
         meta_wf.add_nodes([wf])
     return meta_wf
 
-def analyze_bids_dataset(bold_files, 
-                         anat, 
-                         subject_id, 
-                         task_id, 
-                         model_id, 
-                         TR,
-                         behav=None,
-                         slice_times=None,
-                         target_file=None, 
-                         fs_dir=None, 
-                         conds=None,
-                         comp_cor=False,
-                         run_id=None,
-                         highpass_freq=0.01,
-                         lowpass_freq=0.1, 
-                         fwhm=6.,
-                         surf_fwhm=15., 
-                         contrast=None,
-                         use_derivatives=True,
-                         num_slices=None,
-                         pe_key=None,
-                         readout=None,
-                         topup_AP=None,
-                         topup_PA=None,
-                         readout_topup=None,
-                         outdir=None,
-                         sparse=None,
-                         TA=None,
-                         name='tfmri'):
-    
+def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
+                         TR, behav=None, slice_times=None, target_file=None,
+                         fs_dir=None, conds=None, comp_cor=False, run_id=None,
+                         highpass_freq=0.01, lowpass_freq=0.1, fwhm=6.,
+                         surf_fwhm=15., contrast=None, use_derivatives=True,
+                         num_slices=None, pe_key=None, readout=None,
+                         topup_AP=None, topup_PA=None, readout_topup=None,
+                         outdir=None, sparse=None, TA=None, name='tfmri'):
+
     # Initialize subject workflow and import others
     wf = Workflow(name=name)
     if behav:
@@ -904,7 +867,7 @@ def analyze_bids_dataset(bold_files,
         infosource.iterables = ('bold', bold_files)
 
     # if no slice_times, SpatialRealign algorithm used
-    realign_run = Node(nipy.SpaceTimeRealigner(), 
+    realign_run = Node(nipy.SpaceTimeRealigner(),
                        name='realign_per_run')
     if slice_times:
         realign_run.inputs.slice_times = slice_times
@@ -942,9 +905,9 @@ def analyze_bids_dataset(bold_files,
                                 output_names=['median_file'],
                                 function=median, imports=imports),
                           name='median')
-    
+
     if topup_AP:
-        topup = create_topup_workflow(num_slices, readout, 
+        topup = create_topup_workflow(num_slices, readout,
                                       readout_topup, name='topup')
         topup.inputs.inputspec.topup_AP = topup_AP
         topup.inputs.inputspec.topup_PA = topup_PA
@@ -964,7 +927,7 @@ def analyze_bids_dataset(bold_files,
         wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'corrected_bolds')
         wf.connect(topup, 'outputspec.topup_movpar', joiner, 'topup_movpars')
     else:
-        
+
         joiner = JoinNode(IdentityInterface(fields=['corrected_bolds',
                                                     'nipy_realign_pars']),
                           joinsource='infosource',
@@ -972,7 +935,7 @@ def analyze_bids_dataset(bold_files,
                                      'nipy_realign_pars'],
                           name='joiner_notopup')
         wf.connect(realign_run, 'out_file', joiner, 'corrected_bolds')
-    
+
 
     # save motion params regardless of topup
     wf.connect(realign_run, 'par_file', joiner, 'nipy_realign_pars')
@@ -1010,7 +973,7 @@ def analyze_bids_dataset(bold_files,
     wf.connect(recalc_median, 'median_file', registration, 'inputspec.mean_image')
 
     """ Quantify TSNR in each freesurfer ROI """
-    get_roi_tsnr = MapNode(fs.SegStats(), iterfield=['in_file'], 
+    get_roi_tsnr = MapNode(fs.SegStats(), iterfield=['in_file'],
                            name='get_aparc_tsnr')
     get_roi_tsnr.inputs.default_color_table = True
     get_roi_tsnr.inputs.avgwf_txt_file = True
@@ -1019,7 +982,7 @@ def analyze_bids_dataset(bold_files,
 
     """ Detect outliers in a functional imaging series"""
     art = MapNode(ra.ArtifactDetect(),
-                  iterfield=['realigned_files', 
+                  iterfield=['realigned_files',
                              'realignment_parameters'],
                   name="art")
     art.inputs.use_differences = [True, False]
@@ -1095,7 +1058,7 @@ def analyze_bids_dataset(bold_files,
                            name='maskfunc')
         wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
         wf.connect(masker, 'mask_file', maskfunc, 'in_file2')
-        
+
         # find median value of run (NOTE: different medians if no topup)
         medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
                             iterfield=['in_file', 'mask_file'],
@@ -1115,7 +1078,7 @@ def analyze_bids_dataset(bold_files,
                             name='meanscale')
         wf.connect(smooth, 'out_file', meanscale, 'in_file')
         wf.connect(medianval, ('out_stat', getmeanscale), meanscale, 'op_string')
-        
+
         # Bandpass filters before registration
         wf.connect(meanscale, 'out_file', bandpass, 'files')
 
@@ -1128,7 +1091,7 @@ def analyze_bids_dataset(bold_files,
                                 iterfield=['in_file'],
                              name='meanfunc')
             wf.connect(meanscale, 'out_file', meanfunc, 'in_file')
-        
+
             addmean = MapNode(interface=fsl.BinaryMaths(operation='add'),
                               iterfield=['in_file', 'operand_file'],
                               name='addmean')
@@ -1142,7 +1105,7 @@ def analyze_bids_dataset(bold_files,
         modelfit.inputs.inputspec.film_threshold = 1000
 
     ###############
-    # additional preprocessing 
+    # additional preprocessing
     # standard for resting, optional for event
     ################
     if not behav or comp_cor:
@@ -1165,8 +1128,8 @@ def analyze_bids_dataset(bold_files,
                 np.savetxt(filename, out_params2, fmt=str("%.10f"))
                 out_files.append(filename)
             return out_files
-        
-        
+
+
         motreg = Node(Function(input_names=['motion_params', 'order',
                                             'derivatives'],
                                output_names=['out_files'],
@@ -1174,7 +1137,7 @@ def analyze_bids_dataset(bold_files,
                                imports=imports),
                       name='getmotionregress')
         wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
-        
+
         def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
             """Builds a regressor set comprisong motion parameters, composite norm and
             outliers
@@ -1232,7 +1195,7 @@ def analyze_bids_dataset(bold_files,
                           iterfield=['in_file', 'design', 'out_res_name'],
                           name='filtermotion')
         wf.connect(realign_all, 'out_file', filter1, 'in_file')
-        wf.connect(realign_all, ('out_file', rename, '_filtermotart'), 
+        wf.connect(realign_all, ('out_file', rename, '_filtermotart'),
                    filter1, 'out_res_name')
         wf.connect(createfilter1, 'out_files', filter1, 'design')
 
@@ -1240,13 +1203,13 @@ def analyze_bids_dataset(bold_files,
             """ Utility function for registration seg files """
             import numpy as np
             from nipype.utils.filemanip import filename_to_list, list_to_filename
-            return list_to_filename(np.array(filename_to_list(files))[idx].tolist())  
+            return list_to_filename(np.array(filename_to_list(files))[idx].tolist())
 
-        compcor = MapNode(CompCor(), iterfield=['realigned_file','components_file'], 
+        compcor = MapNode(CompCor(), iterfield=['realigned_file','components_file'],
                           name='aCompCor')
         compcor.inputs.num_components = 5
         wf.connect(filter1, 'out_res', compcor, 'realigned_file')
-        wf.connect(registration, ('outputspec.segmentation_files', selectindex, [0,2]), 
+        wf.connect(registration, ('outputspec.segmentation_files', selectindex, [0,2]),
                    compcor, 'mask_file')
 
         def stacker(motion, physio):
@@ -1439,10 +1402,10 @@ def analyze_bids_dataset(bold_files,
                                              range(49, 55) + [58] + range(1001, 1036) +
                                              range(2001, 2036))
             sampleaparc.inputs.avgwf_txt_file = True
-        
+
             wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
             wf.connect(realign_all, 'out_file', sampleaparc, 'in_file')
-    
+
         def get_subs(subject_id, conds, run_id, model_id, task_id):
             """ Substitutions for files saved in datasink """
             subs = [('_subject_id_%s_' % subject_id, '')]
@@ -1555,7 +1518,7 @@ def analyze_bids_dataset(bold_files,
     # RESTING
     #########
     else: # no onsets
-        
+
         target_subject = ['fsaverage3', 'fsaverage4']
         #bandpass_rs = bandpass.clone(name='bp_rs')
         wf.connect(filter2, 'out_res', smooth, 'in_file')
@@ -1719,7 +1682,7 @@ def analyze_bids_dataset(bold_files,
             os.path.abspath(('OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_'
                              '2mm_v2.nii.gz'))
         wf.connect(maskts, 'out_file', ts2txt, 'timeseries_file')
-        
+
         substitutions = [('_target_subject_', ''),
                          ('_filtermotart_cleaned_bp_trans_masked', ''),
                          ('_filtermotart_cleaned_bp', ''),
@@ -1812,10 +1775,10 @@ if __name__ == '__main__':
                         help="Model index" + defstr)
     parser.add_argument('-t', '--task', required=True,
                         type=str, help="Task name" + defstr)
-    parser.add_argument('--hpfilter', default=0.01, type=float, 
+    parser.add_argument('--hpfilter', default=0.01, type=float,
                         help="High pass frequency (Hz)" + defstr)
     parser.add_argument('--lpfilter', default=0.1, type=float,
-                        help=("Low pass frequency (Hz) - removed for" 
+                        help=("Low pass frequency (Hz) - removed for"
                              " task analysis" + defstr))
     parser.add_argument('--fwhm', default=6.,
                         type=float, help="Volume FWHM" + defstr)
@@ -1859,7 +1822,7 @@ if __name__ == '__main__':
     						  " (Required for sparse models"))
 
     args = parser.parse_args()
-    
+
     data_dir = os.path.abspath(args.datasetdir)
     if args.work_dir:
         workdir = os.path.abspath(args.work_dir)
@@ -1887,16 +1850,16 @@ if __name__ == '__main__':
         from nipype import logging
         config.enable_debug_mode()
         logging.update_logging(config)
-        
-    wf = create_workflow(data_dir, args, 
+
+    wf = create_workflow(data_dir, args,
                          fs_dir, derivatives,
                          workdir, outdir)
     wf.base_dir = workdir
-    
-    # Optional changes
+
+    # Configuration changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
-    wf.config['execution']['job_finished_timeout'] = 60
+    wf.config['execution']['parameterize_dirs'] = False
 
     # View workflow graph
     #wf.write_graph(graph2use='flat')

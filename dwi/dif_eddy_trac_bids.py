@@ -13,7 +13,7 @@ import os
 from glob import glob
 import argparse
 
-from nipype import (Node, Workflow, MapNode, Function, 
+from nipype import (Node, Workflow, MapNode, Function,
                     IdentityInterface, DataSink)
 from nipype.interfaces.fsl import (Eddy, TOPUP, BET)
 from nipype.interfaces.io import SelectFiles
@@ -32,9 +32,13 @@ def get_diff_info(layout, files):
                         * layout.get_metadata(dwi)['EffectiveEchoSpacing'])
     return pe_key, readout
 
-def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir, session=None, subjects=None):
-    """ Creates metaworkflow and iterates through subjects - grabs diffusion weighted images, 
-        bvals, and bvecs from each subject (using pybids) and analyzes at subject level """
+def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir,
+                              session=None, subjects=None):
+    """
+    Creates metaworkflow and iterates through subjects - grabs diffusion
+    weighted images, bvals, and bvecs from each subject (using pybids) and
+    analyzes at subject level
+    """
 
     if not os.path.exists(work_dir):
         os.makedirs(work_dir)
@@ -49,18 +53,18 @@ def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir, session=
     print(subjs_to_analyze)
 
     trac_config = os.path.join(config_dir, 'tracula_config')
-    
+
     meta_wf = Workflow(name='meta_level')
-    
+
     for subj_label in subjs_to_analyze:
         subj = subj_label.replace('sub-','')
         print(subj)
         if session:
-            dwis = sorted([f.filename for f in 
+            dwis = sorted([f.filename for f in
                            layout.get(subject=subj, type='dwi',
                                       session=session_id,
                                       extensions=['nii.gz','nii'])])
-            bvals = sorted([f.filename for f in 
+            bvals = sorted([f.filename for f in
                             layout.get(subject=subj, type='dwi',
                                        session=session_id,
                                        extensions=['bval'])])
@@ -69,10 +73,10 @@ def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir, session=
                                        session=session_id,
                                        extensions=['bvec'])])
         else:
-            dwis = sorted([f.filename for f in 
-                           layout.get(subject=subj, type='dwi', 
+            dwis = sorted([f.filename for f in
+                           layout.get(subject=subj, type='dwi',
                                       extensions=['nii.gz','nii'])])
-            bvals = sorted([f.filename for f in 
+            bvals = sorted([f.filename for f in
                             layout.get(subject=subj, type='dwi',
                                        extensions=['bval'])])
             bvecs = sorted([f.filename for f in
@@ -96,7 +100,7 @@ def create_diffusion_workflow(bids_dir, work_dir, trac_dir, config_dir, session=
     return meta_wf
 
 
-def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout, 
+def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
                       tracula_config, tracula_dir, name='eddy_trac_csd'):
     """ annotate when finished """
 
@@ -109,7 +113,7 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
     infosource.inputs.dwis = dwis
     infosource.inputs.bvals = bvals
     infosource.inputs.bvecs = bvecs
-    
+
     wf.connect(infosource, 'dwis', preproc, 'in_files')
     wf.connect(infosource, 'bvals', preproc, 'bval_files')
     wf.connect(infosource, 'bvecs', preproc, 'bvec_files')
@@ -129,13 +133,14 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
         for idx, fname in enumerate(bval_files):
             vals = np.genfromtxt(fname).flatten()
             bvals.extend(vals.tolist())
-            b0idx = np.nonzero(vals==0)[0]
+            min_val = min(vals)
+            b0idx = np.nonzero(vals==min_val)[0]
             b0indices.extend(len(indices) + b0idx)
             index = np.zeros(vals.shape)
             index[b0idx] = 1
             index = np.cumsum(index)
             indices.extend(len(acqparams) + index)
-            acqp = {'j': [0, -1, 0, '{:.4f}'.format(readout)], 
+            acqp = {'j': [0, -1, 0, '{:.4f}'.format(readout)],
                     'j-': [0, 1, 0, '{:.4f}'.format(readout)]}[order[idx]]
             for _ in range(len(b0idx)):
                 acqparams.append(acqp)
@@ -158,15 +163,15 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
         Merge(in_files=np.array(res.outputs.out_files)[b0indices].tolist(), dimension='t',
               output_type='NIFTI_GZ', merged_file=b0file).run()
         return merged_file, merged_bvals, merged_bvecs, merged_index, acq_file, b0file
-    
-    preproc = Node(Function(input_names=['in_files', 'bval_files', 
+
+    preproc = Node(Function(input_names=['in_files', 'bval_files',
                                          'bvec_files', 'order'],
-                            output_names=['merged_file', 'merged_bvals', 
+                            output_names=['merged_file', 'merged_bvals',
                                           'merged_bvecs', 'merged_index',
                                           'acq_file', 'b0file'],
-                            function=create_files), 
+                            function=create_files),
                    name='preproc')
-    preproc.inputs.order = pe_key    
+    preproc.inputs.order = pe_key
 
     def rotate_bvecs(bvec_file, par_file):
         """ Rotates bvecs """
@@ -197,7 +202,7 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
 
     wf.connect(preproc, 'merged_bvecs', rotate, 'bvec_file')
     wf.connect(eddy, 'out_parameter', rotate, 'par_file')
-    
+
     """
     TRACULA
     """
@@ -215,7 +220,7 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
             fp.write(out)
         from nipype.interfaces.base import CommandLine
         from nipype.pipeline.engine import Node
-        node = Node(CommandLine('trac-all -prep -c %s -no-isrunning -noqa' % config_file, 
+        node = Node(CommandLine('trac-all -prep -c %s -no-isrunning -noqa' % config_file,
                                 terminal_output='allatonce'),
                     name='trac-prep-%s' % sid)
         node.base_dir = os.getcwd()
@@ -224,10 +229,10 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
         return sid, config_file, dwi_file
 
     node1 = Node(Function(input_names=['sid', 'template', 'nifti', 'bvec', 'bval', 'tracula_dir'],
-                          output_names=['sid', 'config_file', 'dwi_file'], 
+                          output_names=['sid', 'config_file', 'dwi_file'],
                           function=run_prep),
                  name='trac-prep')
-    
+
     def run_bedpost(sid, tracula_dir, dwi_file):
         """ """
         import os
@@ -235,6 +240,10 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
         from nipype.interfaces.base import CommandLine
         pwd = os.getcwd()
         os.chdir(os.path.join(tracula_dir, sid))
+        if scanner == 'trio':
+            NJOBS, model = [1, 2]
+        elif scanner == 'prisma':
+            NJOBS, model = []
         bedpost = CommandLine('bedpostx_gpu dmri -NJOBS 1 --model=2 --rician', terminal_output='allatonce')
         if os.path.exists(os.path.join(os.getcwd(), 'dmri.bedpostX')):
             shutil.rmtree(os.path.join(os.getcwd(), 'dmri.bedpostX'))
@@ -242,11 +251,11 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
         bedpost_file = os.path.join(os.getcwd(), 'dmri.bedpostX', 'dyads2.nii.gz')
         os.chdir(pwd)
         return sid, bedpost_file
-    
+
     #bedpost = create_bedpostx_pipeline()
-    
-    node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'], 
-                         output_names=['sid', 'bedpost_file'], function=run_bedpost), 
+
+    node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'],
+                         output_names=['sid', 'bedpost_file'], function=run_bedpost),
                  name='trac-bedp')
     node2.inputs.tracula_dir = tracula_dir
     node2.plugin_args = {'sbatch_args': '--gres=gpu:1',
@@ -254,7 +263,7 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
     wf.connect(node1, 'sid', node2, 'sid')
     wf.connect(node1, 'dwi_file', node2, 'dwi_file')
 
-   
+
 
     def run_path(sid, config_file, bedpost_file):
         import os
@@ -443,8 +452,8 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
     wf.connect(preproc, 'merged_bvals', node1, 'bval')
     wf.connect(rotate, 'bvec_file', node1, 'bvec')
 
-    node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'], 
-                         output_names=['sid', 'bedpost_file'], function=run_bedpost), 
+    node2 = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file'],
+                         output_names=['sid', 'bedpost_file'], function=run_bedpost),
                 name='trac-bedp')
     node2.inputs.tracula_dir = tracula_dir
     node2.plugin_args = {'sbatch_args': '--gres=gpu:1',
@@ -452,15 +461,15 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
     wf.connect(node1, 'sid', node2, 'sid')
     wf.connect(node1, 'dwi_file', node2, 'dwi_file')
 
-    node3 = Node(Function(input_names=['sid', 'config_file', 'bedpost_file'], 
-                         output_names=['sid'], function=run_path), 
+    node3 = Node(Function(input_names=['sid', 'config_file', 'bedpost_file'],
+                         output_names=['sid'], function=run_path),
                 name='trac-path')
     wf.connect(node2, 'sid', node3, 'sid')
     wf.connect(node2, 'bedpost_file', node3, 'bedpost_file')
     wf.connect(node1, 'config_file', node3, 'config_file')
 
     tracker = Node(Function(input_names=['sid', 'tracula_dir', 'dwi_file', 'recon', 'num_threads'],
-                            output_names=['tensor_fa_file', 'tensor_evec_file', 'model_gfa_file', 
+                            output_names=['tensor_fa_file', 'tensor_evec_file', 'model_gfa_file',
                                           'model_track_file'],
                             function=dmri_recon), name='tracker')
     tracker.inputs.recon = 'csd'
@@ -490,7 +499,7 @@ def analyze_diffusion(sid, dwis, bvals, bvecs, pe_key, readout,
     wf.connect(tracker, 'model_track_file', ds, 'recon.@track')
 
     return wf
-    
+
 def main(args=None):
     parser = argparse.ArgumentParser(description=__doc__)
     defstr = ' default %(default)s'
@@ -503,13 +512,13 @@ def main(args=None):
                         help="Session ID (ses-[input])" + defstr)
     parser.add_argument('-c', dest='config',
                         help="Directory where tracula config file is located")
-    parser.add_argument('-w', dest='workdir', 
+    parser.add_argument('-w', dest='workdir',
                         help="Working directory")
-    parser.add_argument('-t', dest='tracdir', 
+    parser.add_argument('-t', dest='tracdir',
                         help="Directory where tracula will output")
     parser.add_argument('-p', dest='plugin', default='MultiProc',
                         help="Plugin to use" + defstr)
-    parser.add_argument('-o', dest='outdir', 
+    parser.add_argument('-o', dest='outdir',
                         help="Output directory")
     parser.add_argument('--plugin_args',
                         help="Plugin arguments")
@@ -544,6 +553,9 @@ def main(args=None):
                                    args.subjects)
     wf.base_dir = workdir
 
+    # Configurations
+    wf.config['execution']['parameterize_dirs'] = False
+
     # run the workflow
     if args.plugin_args:
         wf.run(args.plugin, plugin_args=eval(args.plugin_args))
@@ -552,4 +564,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
