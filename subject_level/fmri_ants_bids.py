@@ -1117,12 +1117,12 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
             for idx, filename in enumerate(filename_to_list(motion_params)):
                 params = np.genfromtxt(filename)
                 out_params = params
-                for d in range(1, derivatives + 1):
+                for d in list(range(1, derivatives + 1)):
                     cparams = np.vstack((np.repeat(params[0, :][None, :], d, axis=0),
                                          params))
                     out_params = np.hstack((out_params, np.diff(cparams, d, axis=0)))
                 out_params2 = out_params
-                for i in range(2, order + 1):
+                for i in list(range(2, order + 1)):
                     out_params2 = np.hstack((out_params2, np.power(out_params, i)))
                 filename = os.path.join(os.getcwd(), "motion_regressor%02d.txt" % idx)
                 np.savetxt(filename, out_params2, fmt=str("%.10f"))
@@ -1168,7 +1168,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                 if detrend_poly:
                     timepoints = out_params.shape[0]
                     X = np.empty((timepoints, 0))
-                    for i in range(detrend_poly):
+                    for i in list(range(detrend_poly)):
                         X = np.hstack((X, legendre(
                             i + 1)(np.linspace(-1, 1, timepoints))[:, None]))
                     out_params = np.hstack((out_params, X))
@@ -1398,9 +1398,9 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
             sampleaparc = MapNode(fs.SegStats(default_color_table=True),
                                   iterfield=['in_file'],
                                   name='aparc_ts')
-            sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
-                                             range(49, 55) + [58] + range(1001, 1036) +
-                                             range(2001, 2036))
+            sampleaparc.inputs.segment_id = ([8] + list(range(10, 14)) + [17, 18, 26, 47] +
+                                             list(range(49, 55)) + [58] + list(range(1001, 1036)) +
+                                             list(range(2001, 2036)))
             sampleaparc.inputs.avgwf_txt_file = True
 
             wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
@@ -1561,9 +1561,9 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                               iterfield=['in_file', 'summary_file',
                                          'avgwf_txt_file'],
                               name='aparc_ts')
-        sampleaparc.inputs.segment_id = ([8] + range(10, 14) + [17, 18, 26, 47] +
-                                         range(49, 55) + [58] + range(1001, 1036) +
-                                         range(2001, 2036))
+        sampleaparc.inputs.segment_id = ([8] + list(range(10, 14)) + [17, 18, 26, 47] +
+                                         list(range(49, 55)) + [58] + list(range(1001, 1036)) +
+                                         list(range(2001, 2036)))
 
         wf.connect(registration, 'outputspec.aparc',
                    sampleaparc, 'segmentation_file')
@@ -1676,8 +1676,8 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                   imports=imports),
                          iterfield=['timeseries_file'],
                          name='getsubcortts')
-        ts2txt.inputs.indices = [8] + range(10, 14) + [17, 18, 26, 47] +\
-                                range(49, 55) + [58]
+        ts2txt.inputs.indices = [8] + list(range(10, 14)) + [17, 18, 26, 47] +\
+                                list(range(49, 55)) + [58]
         ts2txt.inputs.label_file = \
             os.path.abspath(('OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_'
                              '2mm_v2.nii.gz'))
@@ -1856,9 +1856,10 @@ if __name__ == '__main__':
                          workdir, outdir)
     wf.base_dir = workdir
 
-    # Configuration changes
+    # Optional changes
     #wf.config['execution']['remove_unnecessary_outputs'] = False
     #wf.config['execution']['poll_sleep_duration'] = 2
+    #wf.config['execution']['job_finished_timeout'] = 60
     wf.config['execution']['parameterize_dirs'] = False
 
     # View workflow graph
