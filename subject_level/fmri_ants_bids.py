@@ -1216,7 +1216,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
             """ Combine motion regressors with physiological noise """
             import numpy as np
             import os
-            components = np.hstack((np.genfromtxt(physio),np.genfromtxt(motion)))
+            components = np.hstack((np.genfromtxt(physio, skip_header=True),np.genfromtxt(motion)))
             components_file = os.path.join(os.getcwd(), 'noise_components.txt')
             np.savetxt(components_file, components, fmt=str("%.10f"))
             return components_file
@@ -1814,13 +1814,19 @@ if __name__ == '__main__':
                         help="Activate nipype debug mode" + defstr)
     parser.add_argument('--cc', action="store_true",
                         help="CompCor correction for task analysis" + defstr)
+    # sparse model inputs
     sparser = parser.add_argument_group('Sparse model inputs')
     sparser.add_argument('--sparse', action="store_true",
     					 help="Sparse model specification" + defstr)
     sparser.add_argument('-ta', dest="TA", default=None, type=float,
     					 help=("Time in seconds to acquire a single image volume"
     						  " (Required for sparse models"))
-
+    # submission arguments
+    submission = parser.add_argument_group('Plugin arguments')
+    submission.add_argument('--mem', type=int, default=5,
+                            help="Estimated memory usage (in GB)" + defstr)
+    submission.add_argument('--procs', type=int, default=4,
+                            help="Number of processes (threads)" + defstr)
     args = parser.parse_args()
 
     data_dir = os.path.abspath(args.datasetdir)
@@ -1861,11 +1867,15 @@ if __name__ == '__main__':
     #wf.config['execution']['poll_sleep_duration'] = 2
     #wf.config['execution']['job_finished_timeout'] = 60
     wf.config['execution']['parameterize_dirs'] = False
+    wf.config['execution']['crashfile_format'] = 'txt'
 
     # View workflow graph
     #wf.write_graph(graph2use='flat')
 
     if args.plugin_args:
-        wf.run(args.plugin, plugin_args=eval(args.plugin_args))
+        if args.plugin == 'MultiProc':
+            wf.run(args.plugin, plugin_args={'n_procs': args.procs, 'memory_gb': args.mem})
+        else: # SLURM
+            wf.run(args.plugin, plugin_args=eval(args.plugin_args))
     else:
         wf.run(args.plugin)
