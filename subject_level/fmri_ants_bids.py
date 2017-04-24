@@ -12,8 +12,9 @@ This script demonstrates how to use nipype to analyze a BIDS data set::
     python fmri_ants_bids.py /path/to/bids/dir
 
 RESTING-STATE REQ:
-- `Joint Fusion Atlas <http://mindboggle.info/data/atlases/jointfusion/OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_2mm_v2.nii.gz>`_
-- `MNI template <http://mindboggle.info/data/templates/ants/OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz>`_
+- Joint Fusion Atlas - OASIS-TRT-20_jointfusion_DKT31_CMA_labels_in_MNI152_2mm_v2.nii.gz
+- MNI template - OASIS-30_Atropos_template_in_MNI152_2mm.nii.gz
+- `Download <https://dataverse.harvard.edu/dataverse/mindboggle101?q=OASIS>`_
 """
 
 from nipype import config
@@ -1716,6 +1717,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
         # Save the relevant data into an output directory
         datasink = Node(interface=DataSink(), name="datasink")
         datasink.inputs.base_directory = outdir
+        datasink.inputs.container = subject_id
         datasink.inputs.substitutions = substitutions
         datasink.inputs.regexp_substitutions = regex_subs
         wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
@@ -1751,6 +1753,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
 
         datasink2 = Node(interface=DataSink(), name="datasink2")
         datasink2.inputs.base_directory = outdir
+        datasink2.inputs.container = subject_id
         datasink2.inputs.substitutions = substitutions
         datasink2.inputs.regexp_substitutions = regex_subs
         wf.connect(combiner, 'out_file',
