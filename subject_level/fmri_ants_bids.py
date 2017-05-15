@@ -867,14 +867,15 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                       name='infosource')
         infosource.iterables = ('bold', bold_files)
 
-    # if no slice_times, SpatialRealign algorithm used
-    realign_run = Node(nipy.SpaceTimeRealigner(),
+    # replace slicetimerealign with mcflirt for now, register to middle vol
+    realign_run = Node(fsl.MCFLIRT(),
                        name='realign_per_run')
-    if slice_times:
-        realign_run.inputs.slice_times = slice_times
-        realign_run.inputs.slice_info = 2
-        realign_run.inputs.tr = TR
-    realign_run.plugin_args = {'sbatch_args': '-c 4'}
+    realign_run.inputs.dof = 6
+    #if slice_times:
+    #    realign_run.inputs.slice_times = slice_times
+    #    realign_run.inputs.slice_info = 2
+    #    realign_run.inputs.tr = TR
+    #realign_run.plugin_args = {'sbatch_args': '-c 4'}
     wf.connect(infosource, 'bold', realign_run, 'in_file')
 
     def median(in_files):
@@ -918,11 +919,11 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
         wf.connect(calc_median, 'median_file', topup, 'inputspec.ref_file')
 
         joiner = JoinNode(IdentityInterface(fields=['corrected_bolds',
-                                                    'nipy_realign_pars',
+                                                    'mcf_realign_pars',
                                                     'topup_movpars']),
                           joinsource='infosource',
                           joinfield=['corrected_bolds',
-                                     'nipy_realign_pars',
+                                     'mcf_realign_pars',
                                      'topup_movpars'],
                           name='joiner_topup')
         wf.connect(topup, 'outputspec.applytopup_corrected', joiner, 'corrected_bolds')
@@ -930,19 +931,22 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
     else:
 
         joiner = JoinNode(IdentityInterface(fields=['corrected_bolds',
-                                                    'nipy_realign_pars']),
+                                                    'mcf_realign_pars']),
                           joinsource='infosource',
                           joinfield=['corrected_bolds',
-                                     'nipy_realign_pars'],
+                                     'mcf_realign_pars'],
                           name='joiner_notopup')
         wf.connect(realign_run, 'out_file', joiner, 'corrected_bolds')
 
 
     # save motion params regardless of topup
-    wf.connect(realign_run, 'par_file', joiner, 'nipy_realign_pars')
+    wf.connect(realign_run, 'par_file', joiner, 'mcf_realign_pars')
 
-    #realign across runs
-    realign_all = realign_run.clone(name='realign_allruns')
+    #realign all runs again
+    realign_all = MapNode(fsl.MCFLIRT(),
+                          iterfield=['in_file'],
+                          name='realign_all')
+    realign_all.inputs.dof = 6
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
     tsnr = MapNode(TSNR(regress_poly=2), iterfield=['in_file'], name='tsnr')
@@ -993,7 +997,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
     art.inputs.mask_type = 'spm_global'
     art.inputs.parameter_source = 'NiPy'
     wf.connect([(realign_all, art, [('out_file', 'realigned_files')]),
-                (joiner, art, [('nipy_realign_pars', 'realignment_parameters')])
+                (joiner, art, [('mcf_realign_pars', 'realignment_parameters')])
                 ])
 
     def bandpass_filter(files, lowpass_freq, highpass_freq, fs):
@@ -1137,7 +1141,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                function=motion_regressors,
                                imports=imports),
                       name='getmotionregress')
-        wf.connect(joiner, 'nipy_realign_pars', motreg, 'motion_params')
+        wf.connect(joiner, 'mcf_realign_pars', motreg, 'motion_params')
 
         def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
             """Builds a regressor set comprisong motion parameters, composite norm and
@@ -1312,7 +1316,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
         # bold model connections
         wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
         wf.connect(realign_all, 'out_file', modelspec, 'functional_runs')
-        wf.connect(joiner, 'nipy_realign_pars', modelspec, 'realignment_parameters')
+        wf.connect(joiner, 'mcf_realign_pars', modelspec, 'realignment_parameters')
         wf.connect(art, 'outlier_files', modelspec, 'outlier_files')
         wf.connect(modelspec, 'session_info', modelfit, 'inputspec.session_info')
 
@@ -1482,7 +1486,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                       ('design_image', 'qa.model.@matrix_image'),
                                       ('design_file', 'qa.model.@matrix'),
                                      ])])
-        wf.connect([(joiner, datasink, [('nipy_realign_pars',
+        wf.connect([(joiner, datasink, [('mcf_realign_pars',
                                           'qa.motion')]),
                     (registration, datasink, [('outputspec.mean2anat_mask', 'qa.mask')])])
         wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
