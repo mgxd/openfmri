@@ -871,11 +871,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
     realign_run = Node(fsl.MCFLIRT(),
                        name='realign_per_run')
     realign_run.inputs.dof = 6
-    #if slice_times:
-    #    realign_run.inputs.slice_times = slice_times
-    #    realign_run.inputs.slice_info = 2
-    #    realign_run.inputs.tr = TR
-    #realign_run.plugin_args = {'sbatch_args': '-c 4'}
+    realign_run.inputs.save_plots = True # or save_mats?
     wf.connect(infosource, 'bold', realign_run, 'in_file')
 
     def median(in_files):
@@ -942,23 +938,32 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
     # save motion params regardless of topup
     wf.connect(realign_run, 'par_file', joiner, 'mcf_realign_pars')
 
-    #realign all runs again
+    # realign all runs again
     realign_all = MapNode(fsl.MCFLIRT(),
                           iterfield=['in_file'],
                           name='realign_all')
     realign_all.inputs.dof = 6
+    realign_all.inputs.save_plots = True
+    wf.connect(joiner, 'corrected_bolds', realign_all, 'in_file')
+
+    # Flatten realigned files to single list
+    merge_realign = Node(Merge(1), name='merge_realign')
+    merge_realign.inputs.ravel_inputs = True
+    wf.connect(realign_all, 'out_file', merge_realign, 'in1')
+
+    # Flatten movement parameters as well
+    merge_pars = merge_realign.clone('merge_par')
+    merge_pars.inputs.ravel_inputs = True
+    wf.connect(joiner, 'mcf_realign_pars', merge_pars, 'in1')
 
     # Comute TSNR on realigned data regressing polynomials upto order 2
     tsnr = MapNode(TSNR(regress_poly=2), iterfield=['in_file'], name='tsnr')
     tsnr.plugin_args = {'qsub_args': '-pe orte 4',
                        'sbatch_args': '--mem=16G -c 4'}
+    wf.connect(merge_realign, 'out', tsnr, 'in_file')
 
     # regardless of topup makes workflow easier to connect
     recalc_median = calc_median.clone(name='recalc_median')
-
-
-    wf.connect(joiner, 'corrected_bolds', realign_all, 'in_file')
-    wf.connect(realign_all, 'out_file', tsnr, 'in_file')
     wf.connect(tsnr, 'detrended_file', recalc_median, 'in_files')
 
     # segment and register
@@ -996,8 +1001,8 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
     art.inputs.zintensity_threshold = 3
     art.inputs.mask_type = 'spm_global'
     art.inputs.parameter_source = 'NiPy'
-    wf.connect([(realign_all, art, [('out_file', 'realigned_files')]),
-                (joiner, art, [('mcf_realign_pars', 'realignment_parameters')])
+    wf.connect([(merge_realign, art, [('out', 'realigned_files')]),
+                (merge_pars, art, [('out', 'realignment_parameters')])
                 ])
 
     def bandpass_filter(files, lowpass_freq, highpass_freq, fs):
@@ -1061,14 +1066,14 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                                     op_string='-mas'),
                            iterfield=['in_file'],
                            name='maskfunc')
-        wf.connect(realign_all, 'out_file', maskfunc, 'in_file')
+        wf.connect(merge_realign, 'out', maskfunc, 'in_file')
         wf.connect(masker, 'mask_file', maskfunc, 'in_file2')
 
         # find median value of run (NOTE: different medians if no topup)
         medianval = MapNode(interface=fsl.ImageStats(op_string='-k %s -p 50'),
                             iterfield=['in_file', 'mask_file'],
                             name='medianval')
-        wf.connect(realign_all, 'out_file', medianval, 'in_file')
+        wf.connect(merge_realign, 'out', medianval, 'in_file')
         wf.connect(maskfunc, 'out_file', medianval, 'mask_file')
 
         # smooth func files
@@ -1141,7 +1146,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                function=motion_regressors,
                                imports=imports),
                       name='getmotionregress')
-        wf.connect(joiner, 'mcf_realign_pars', motreg, 'motion_params')
+        wf.connect(merge_pars, 'out', motreg, 'motion_params')
 
         def build_filter1(motion_params, comp_norm, outliers, detrend_poly=None):
             """Builds a regressor set comprisong motion parameters, composite norm and
@@ -1199,8 +1204,8 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                   demean=True),
                           iterfield=['in_file', 'design', 'out_res_name'],
                           name='filtermotion')
-        wf.connect(realign_all, 'out_file', filter1, 'in_file')
-        wf.connect(realign_all, ('out_file', rename, '_filtermotart'),
+        wf.connect(merge_realign, 'out', filter1, 'in_file')
+        wf.connect(merge_realign, ('out', rename, '_filtermotart'),
                    filter1, 'out_res_name')
         wf.connect(createfilter1, 'out_files', filter1, 'design')
 
@@ -1315,8 +1320,8 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
 
         # bold model connections
         wf.connect(reshape_behav, 'behav', modelspec, 'event_files')
-        wf.connect(realign_all, 'out_file', modelspec, 'functional_runs')
-        wf.connect(joiner, 'mcf_realign_pars', modelspec, 'realignment_parameters')
+        wf.connect(merge_realign, 'out', modelspec, 'functional_runs')
+        wf.connect(merge_pars, 'out', modelspec, 'realignment_parameters')
         wf.connect(art, 'outlier_files', modelspec, 'outlier_files')
         wf.connect(modelspec, 'session_info', modelfit, 'inputspec.session_info')
 
@@ -1409,7 +1414,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
             sampleaparc.inputs.avgwf_txt_file = True
 
             wf.connect(registration, 'outputspec.aparc', sampleaparc, 'segmentation_file')
-            wf.connect(realign_all, 'out_file', sampleaparc, 'in_file')
+            wf.connect(merge_realign, 'out', sampleaparc, 'in_file')
 
         def get_subs(subject_id, conds, run_id, model_id, task_id):
             """ Substitutions for files saved in datasink """
@@ -1486,7 +1491,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
                                       ('design_image', 'qa.model.@matrix_image'),
                                       ('design_file', 'qa.model.@matrix'),
                                      ])])
-        wf.connect([(joiner, datasink, [('mcf_realign_pars',
+        wf.connect([(merge_pars, datasink, [('out',
                                           'qa.motion')]),
                     (registration, datasink, [('outputspec.mean2anat_mask', 'qa.mask')])])
         wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
@@ -1724,7 +1729,7 @@ def analyze_bids_dataset(bold_files, anat, subject_id, task_id, model_id,
         datasink.inputs.container = subject_id
         datasink.inputs.substitutions = substitutions
         datasink.inputs.regexp_substitutions = regex_subs
-        wf.connect(realign_all, 'par_file', datasink, 'qa.motion')
+        wf.connect(merge_pars, 'out', datasink, 'qa.motion')
         wf.connect(art, 'norm_files', datasink, 'qa.art.@norm')
         wf.connect(art, 'intensity_files', datasink, 'qa.art.@intensity')
         wf.connect(art, 'outlier_files', datasink, 'qa.art.@outlier_files')
