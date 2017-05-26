@@ -803,9 +803,13 @@ def create_workflow(bids_dir, args, fs_dir, derivatives, workdir, outdir):
         # until BIDS decides on modeling, use old gablab style
         behav = None
         if not args.resting:
-            behav = [x for x in glob(
-                    os.path.join(old_model_dir, 'onsets', subj_label,
+            if len(conds) < 10:
+                behav = [x for x in glob(os.path.join(old_model_dir, 'onsets', subj_label,
+                    'task-{}*'.format(task_id), 'cond00[{}-{}].txt'.format(1, len(conds))))]
+            else:
+                behav = [x for x in glob(os.path.join(old_model_dir, 'onsets', subj_label,
                                  'task-{}*'.format(task_id), 'cond*.txt'))]
+
             # task but missing behav
             if not behav:
                 print('{} missing onsets and will be excluded from analysis').format(subj_label)
