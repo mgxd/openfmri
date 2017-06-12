@@ -13,9 +13,9 @@ This script demonstrates how to use nipype to analyze a data set::
 """
 
 from nipype import config
-config.enable_provenance()
+#config.enable_provenance()
 
-import six
+#from nipype.external import six
 
 from glob import glob
 import os
@@ -444,7 +444,7 @@ def create_fs_reg_workflow(name='registration'):
     reg.inputs.output_warped_image = 'output_warped_image.nii.gz'
     reg.inputs.num_threads = 4
     reg.plugin_args = {'qsub_args': '-pe orte 4',
-                       'sbatch_args': '--mem=6G -c 4'}
+                       'sbatch_args': '-t 2:00:00 --mem=6G -c 4'}
     register.connect(stripper, 'out_file', reg, 'moving_image')
     register.connect(inputnode,'target_image', reg,'fixed_image')
 
@@ -582,12 +582,12 @@ def get_subjectinfo(subject_id, base_dir, task_id, model_id, session_id=None):
                                              subject_id,
                                              session_id,
                                              'func',
-                                             '*%s*.nii.gz'%(task))))
+                                             '*%s*bold.nii.gz'%(task))))
         else:
             files = sorted(glob(os.path.join(base_dir,
                                              subject_id,
                                              'func',
-                                             '*%s*.nii.gz'%(task))))
+                                             '*%s*bold.nii.gz'%(task))))
             
         runs = [int(re.search('(?<=run-)\d+',os.path.basename(val)).group(0)) for val in files]
         run_ids.insert(idx, runs)
@@ -830,7 +830,7 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
             behav = [behav]
         behav_array = np.array(behav).flatten()
         num_elements = behav_array.shape[0]
-        return behav_array.reshape(num_elements/num_conds, num_conds).tolist()
+        return behav_array.reshape(num_elements//num_conds, num_conds).tolist()
 
     reshape_behav = pe.Node(niu.Function(input_names=['behav', 'run_id', 'conds'],
                                        output_names=['behav'],
@@ -895,8 +895,8 @@ def analyze_openfmri_dataset(data_dir, subject=None, model_id=None,
         n_runs = len(copes)
         all_copes = np.array(copes).flatten()
         all_varcopes = np.array(varcopes).flatten()
-        outcopes = all_copes.reshape(len(all_copes)/num_copes, num_copes).T.tolist()
-        outvarcopes = all_varcopes.reshape(len(all_varcopes)/num_copes, num_copes).T.tolist()
+        outcopes = all_copes.reshape(len(all_copes)//num_copes, num_copes).T.tolist()
+        outvarcopes = all_varcopes.reshape(len(all_varcopes)//num_copes, num_copes).T.tolist()
         return outcopes, outvarcopes, n_runs
 
     cope_sorter = pe.Node(niu.Function(input_names=['copes', 'varcopes',
