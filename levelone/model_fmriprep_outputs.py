@@ -1,5 +1,5 @@
 """
-Individual (and group level later?) analysis using `fmriprep` outputs and FSL.
+Individual and (group level?) analysis using `fmriprep` outputs and FSL.
 
 Adapted script from original notebook:
 https://github.com/poldrack/fmri-analysis-vm/blob/master/analysis/postFMRIPREPmodelling/First%20and%20Second%20Level%20Modeling%20(FSL).ipynb
@@ -7,24 +7,28 @@ https://github.com/poldrack/fmri-analysis-vm/blob/master/analysis/postFMRIPREPmo
 Requirement: BIDS dataset (including events.tsv), fmriprep outputs, and modeling files [more on this when concrete]
 
 """
+from nipype.workflows.fmri.fsl import create_fixed_effects_flow
 import nipype.algorithms.modelgen as model
 from  nipype.interfaces import fsl, ants
 from nipype.interfaces.base import Bunch
-from nipype import Workflow, Node, IdentityInterface, Function, DataSink
+from nipype import Workflow, Node, IdentityInterface, Function, DataSink, JoinNode
 import os
 import os.path as op
 import argparse
 from bids.grabbids import BIDSLayout
 
+
 __version__ = '0.0.1'
+
 
 def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
                                events, session, TR, sparse, workdir, dropvols=4,
-                               name="post-fmriprep-l1"):
+                               name="sub-{}_task-{}_levelone"):
     """Processing pipeline"""
 
     # initialize workflow
-    wf = Workflow(name=name, base_dir=workdir)
+    wf = Workflow(name=name.format(subj, task),
+                  base_dir=workdir)
 
     infosource = Node(IdentityInterface(fields=['run_id', 'event_file']), name='infosource')
     infosource.iterables = [('run_id', runs),
@@ -58,7 +62,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
                                              "mni_file",
                                              "mni_mask"],
                                function=data_grabber),
-                      name='datagrab')
+                      name='datasource')
     datasource.inputs.subj = subj
     datasource.inputs.task = task
     datasource.inputs.fmriprep_dir = fmriprep_dir
@@ -133,6 +137,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
         wf.connect(datasource, "mni_file", modelspec, "functional_runs")
 
     def read_contrasts(bids_dir, task):
+        """potential BUG? This will not update if contrasts file is changed."""
         import os.path as op
 
         contrasts = []
@@ -189,20 +194,70 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
     wf.connect(modelgen, "con_file", glm, "tcon_file")
     wf.connect(modelgen, "fcon_file", glm, "fcon_file")
 
-    # now save outputs
+    join_fields = ["mask_files", "dof_file", "copes", "varcopes"]
+    joiner = JoinNode(IdentityInterface(fields=join_fields),
+                      joinsource='infosource',
+                      joinfield=join_fields,
+                      name="joiner")
+
+    wf.connect(datasource, "mni_mask", joiner, "mask_files")
+    wf.connect(glm, "dof_file", joiner, "dof_file")
+    wf.connect(glm, "copes", joiner, "copes")
+    wf.connect(glm, "varcopes", joiner, "varcopes")
+
+    def join_copes(copes, varcopes):
+        """Has to be flexible enough to handle multiple runs
+
+        Length of copes/varcopes should equal number of conditions
+        """
+        copes = [list(cope) for cope in zip(*copes)]
+        varcopes = [list(varc) for varc in zip(*varcopes)]
+        return copes, varcopes
+
+    copesjoin = Node(Function(function=join_copes,
+                                output_names=["copes", "varcopes"]),
+                       name='copesjoiner')
+    wf.connect(joiner, "copes", copesjoin, "copes")
+    wf.connect(joiner, "varcopes", copesjoin, "varcopes")
+
+    # fixed_effects to combine stats across runs
+    fixed_fx = create_fixed_effects_flow()
+    fixed_fx.get_node("l2model").inputs.num_copes = len(runs)
+
+    # use the first mask since they should all be in same space
+    pickfirst = lambda x: x[0]
+
+    wf.connect(joiner, ("mask_files", pickfirst), fixed_fx, "flameo.mask_file")
+    wf.connect(joiner, "dof_file", fixed_fx, "inputspec.dof_files")
+    wf.connect(copesjoin, "copes", fixed_fx, "inputspec.copes")
+    wf.connect(copesjoin, "varcopes", fixed_fx, "inputspec.varcopes")
+
+    def substitutes(contrasts):
+        """Datasink output path substitutes"""
+        subs = []
+        for i, con in enumerate(contrasts):
+            # replace annoying chars in filename
+            name = con[0].replace(" ", "").replace(">", "_gt_").lower()
+
+            subs.append(('_flameo%d/cope1.' % i, '%s_cope.' % name))
+            subs.append(('_flameo%d/varcope1.' % i, '%s_varcope.' % name))
+            subs.append(('_flameo%d/zstat1.' % i, '%s_zstat.' % name))
+            subs.append(('_flameo%d/tstat1.' % i, '%s_tstat.' % name))
+        return subs
+
+
+    gensubs = Node(Function(function=substitutes), name="substitute-gen")
+    wf.connect(contrastgen, "contrasts", gensubs, "contrasts")
+
+    # stats should equal number of conditions...
     sinker = Node(DataSink(), name="datasink")
     sinker.inputs.base_directory = outdir
-    sinker.inputs.container = "sub-" + subj
 
-    # TODO: how to handle multiple runs???
-    # currently this overwrites
-
-    wf.connect(glm, "zstats", sinker, "stats.mni.@zstats")
-    wf.connect(glm, "copes", sinker, "stats.mni.@copes")
-    wf.connect(glm, "zfstats", sinker, "stats.mni.@zfstats")
-    wf.connect(glm, "tstats", sinker, "stats.mni.@tstats")
-    wf.connect(glm, "varcopes", sinker, "stats.mni.@varcopes")
-    wf.connect(masker, "out_file", sinker, "mean.mni.@preproc_brain")
+    wf.connect(gensubs, "out", sinker, "substitutions")
+    wf.connect(fixed_fx, "outputspec.zstats", sinker, "stats.mni.@zstats")
+    wf.connect(fixed_fx, "outputspec.copes", sinker, "stats.mni.@copes")
+    wf.connect(fixed_fx, "outputspec.tstats", sinker, "stats.mni.@tstats")
+    wf.connect(fixed_fx, "outputspec.varcopes", sinker, "stats.mni.@varcopes")
     return wf
 
 def argparser():
@@ -249,14 +304,17 @@ def process_subject(layout, bids_dir, subj, task, fmriprep_dir, session, outdir,
     epi = layout.get(subject=subj, type="bold", task=task, return_type="file")[0]
     TR = layout.get_metadata(epi)["RepetitionTime"]
 
+    # IF RESTING - not necessary
+    # will result in entirely new pipeline...
     if not events:
         raise FileNotFoundError(
             "No event files found for subject {}".format(subj)
         )
 
+    suboutdir = op.join(outdir, 'sub-' + subj, task)
 
     wf = create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs,
-                                    outdir, events, session, TR, sparse, workdir)
+                                    suboutdir, events, session, TR, sparse, workdir)
 
     return wf
 
@@ -274,8 +332,8 @@ def main(argv=None):
         raise IOError("fmriprep directory {} not found.".format(fmriprep_dir))
 
     workdir, outdir = op.realpath(args.workdir), op.realpath(args.outdir)
-    if not op.exists(outdir):
-        os.makedirs(outdir)
+    if not op.exists(workdir):
+        os.makedirs(workdir)
 
     layout = BIDSLayout(args.bids_dir)
 
