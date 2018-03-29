@@ -22,7 +22,7 @@ __version__ = '0.0.1'
 
 
 def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
-                               events, session, TR, sparse, workdir, dropvols=4,
+                               events, session, TR, sparse, workdir, dropvols,
                                name="sub-{}_task-{}_levelone"):
     """Processing pipeline"""
 
@@ -40,10 +40,10 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
         """Quick filegrabber ala SelectFiles/DataGrabber"""
         import os.path as op
 
-        prefix = 'sub-{}_task-{}_run-{:02d}'.format(subj, task, run_id)
+        prefix = 'sub-{}_task-{}_run-{:01d}'.format(subj, task, run_id)
         fmriprep_func = op.join(fmriprep_dir, "sub-{}".format(subj), "func")
         if session:
-            prefix = 'sub-{}_ses-{}_task-{}_run-{:02d}'.format(
+            prefix = 'sub-{}_ses-{}_task-{}_run-{:01d}'.format(
                 subj, session, task, run_id
             )
             fmriprep_func = op.join(fmriprep_dir, "sub-{}".format(subj),
@@ -222,10 +222,12 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
 
     # fixed_effects to combine stats across runs
     fixed_fx = create_fixed_effects_flow()
+    fixed_fx.config['execution']['crashfile_format'] = 'txt'
+
     fixed_fx.get_node("l2model").inputs.num_copes = len(runs)
 
     # use the first mask since they should all be in same space
-    pickfirst = lambda x: x[0]
+    pickfirst = lambda x: x[0] if not isinstance(x, str) else x
 
     wf.connect(joiner, ("mask_files", pickfirst), fixed_fx, "flameo.mask_file")
     wf.connect(joiner, "dof_file", fixed_fx, "inputspec.dof_files")
@@ -281,9 +283,12 @@ def argparser():
                         help="Specify a sparse model")
     parser.add_argument("-p", dest="plugin",
                         help="Nipype plugin to use (default: MultiProc)")
+    parser.add_argument("--drop", dest="drop", type=int,
+                        help="Number of starting volumes (dummy scans) to remove")
     return parser
 
-def process_subject(layout, bids_dir, subj, task, fmriprep_dir, session, outdir, workdir, sparse):
+def process_subject(layout, bids_dir, subj, task, fmriprep_dir,
+                    session, outdir, workdir, sparse, dropvols):
     """Grab information and start nipype workflow
     We want to parallelize runs for greater efficiency
 
@@ -314,7 +319,8 @@ def process_subject(layout, bids_dir, subj, task, fmriprep_dir, session, outdir,
     suboutdir = op.join(outdir, 'sub-' + subj, task)
 
     wf = create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs,
-                                    suboutdir, events, session, TR, sparse, workdir)
+                                    suboutdir, events, session, TR, sparse, workdir,
+                                    dropvols)
 
     return wf
 
@@ -345,7 +351,7 @@ def main(argv=None):
     for subj in subjects:
         for task in tasks:
             wf = process_subject(layout, args.bids_dir, subj, task, fmriprep_dir,
-                                 args.session, outdir, workdir, args.sparse)
+                                 args.session, outdir, workdir, args.sparse, args.drop)
 
             wf.config["execution"]["crashfile_format"] = "txt"
             wf.config["execution"]["parameterize_dirs"] = False
