@@ -229,8 +229,6 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
     
     # fixed_effects to combine stats across runs
     fixed_fx = create_fixed_effects_flow()
-    fixed_fx.config['execution']['crashfile_format'] = 'txt'
-
     fixed_fx.get_node("l2model").inputs.num_copes = len(runs)
     
     # use the first mask since they should all be in same space
