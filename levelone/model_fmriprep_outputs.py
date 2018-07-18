@@ -9,7 +9,7 @@ Requirement: BIDS dataset (including events.tsv), fmriprep outputs, and modeling
 """
 from nipype.workflows.fmri.fsl import create_fixed_effects_flow
 import nipype.algorithms.modelgen as model
-from  nipype.interfaces import fsl, ants
+from  nipype.interfaces import fsl, ants    
 from nipype.interfaces.base import Bunch
 from nipype import Workflow, Node, IdentityInterface, Function, DataSink, JoinNode
 import os
@@ -22,12 +22,12 @@ __version__ = '0.0.1'
 
 
 def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
-                               events, session, TR, sparse, workdir, dropvols=4,
+                               events, session, TR, sparse, workdir, dropvols,
                                name="sub-{}_task-{}_levelone"):
     """Processing pipeline"""
 
     # initialize workflow
-    wf = Workflow(name=name.format(subj, task),
+    wf = Workflow(name=name.format(subj, task), 
                   base_dir=workdir)
 
     infosource = Node(IdentityInterface(fields=['run_id', 'event_file']), name='infosource')
@@ -40,28 +40,28 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
         """Quick filegrabber ala SelectFiles/DataGrabber"""
         import os.path as op
 
-        prefix = 'sub-{}_task-{}_run-{:02d}'.format(subj, task, run_id)
+        prefix = 'sub-{}_task-{}_run-{:01d}'.format(subj, task, run_id)
         fmriprep_func = op.join(fmriprep_dir, "sub-{}".format(subj), "func")
         if session:
-            prefix = 'sub-{}_ses-{}_task-{}_run-{:02d}'.format(
+            prefix = 'sub-{}_ses-{}_task-{}_run-{:01d}'.format(
                 subj, session, task, run_id
             )
-            fmriprep_func = op.join(fmriprep_dir, "sub-{}".format(subj),
+            fmriprep_func = op.join(fmriprep_dir, "sub-{}".format(subj), 
                                     "ses-{}".format(session), "func")
 
         # grab these files
         confound_file = op.join(fmriprep_func, "{}_bold_confounds.tsv".format(prefix))
         mni_file = op.join(
-            fmriprep_func,
+            fmriprep_func, 
             "{}_bold_space-MNI152NLin2009cAsym_preproc.nii.gz".format(prefix)
         )
         mni_mask = mni_file.replace("_preproc.", "_brainmask.")
         return confound_file, mni_file, mni_mask
 
-    datasource = Node(Function(output_names=["confound_file",
-                                             "mni_file",
+    datasource = Node(Function(output_names=["confound_file", 
+                                             "mni_file", 
                                              "mni_mask"],
-                               function=data_grabber),
+                               function=data_grabber), 
                       name='datasource')
     datasource.inputs.subj = subj
     datasource.inputs.task = task
@@ -74,7 +74,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
         """Defines `SpecifyModel` information from BIDS events."""
         import pandas as pd
         from nipype.interfaces.base import Bunch
-
+        
         events = pd.read_csv(event_file, sep="\t")
         trial_types = events.trial_type.unique()
         onset = []
@@ -82,7 +82,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
         for trial in trial_types:
             onset.append(events[events.trial_type == trial].onset.tolist())
             duration.append(events[events.trial_type == trial].duration.tolist())
-
+            
         confounds = pd.read_csv(confound_file, sep="\t", na_values="n/a")
         regressors = []
         for regressor in regressor_names:
@@ -103,7 +103,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
 
     modelinfo = Node(Function(function=gen_model_info), name="modelinfo")
     modelinfo.inputs.dropvols = dropvols
-
+    
     # these will likely be in bids model json in the future
     modelinfo.inputs.regressor_names = [
         'FramewiseDisplacement',
@@ -130,12 +130,12 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
     modelspec.inputs.time_repetition = TR
     modelspec.inputs.high_pass_filter_cutoff = 128.
     wf.connect(modelinfo, "out", modelspec, "subject_info")
-
+    
     if dropvols:
         wf.connect(roi, "roi_file", modelspec, "functional_runs")
     else:
         wf.connect(datasource, "mni_file", modelspec, "functional_runs")
-
+    
     def read_contrasts(bids_dir, task):
         """potential BUG? This will not update if contrasts file is changed."""
         import os.path as op
@@ -152,8 +152,8 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
                 continue
 
             contrasts.append([
-                row[1],
-                "T",
+                row[1], 
+                "T", 
                 [cond for cond in row[2].split(" ")],
                 [float(w) for w in row[3].split(" ")]
             ])
@@ -181,7 +181,7 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
 
     masker = Node(fsl.ApplyMask(), name="masker")
     wf.connect(datasource, "mni_mask", masker, "mask_file")
-
+    
     if dropvols:
         wf.connect(roi, "roi_file", masker, "in_file")
     else:
@@ -199,60 +199,69 @@ def create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, outdir,
                       joinsource='infosource',
                       joinfield=join_fields,
                       name="joiner")
-
+    
     wf.connect(datasource, "mni_mask", joiner, "mask_files")
     wf.connect(glm, "dof_file", joiner, "dof_file")
     wf.connect(glm, "copes", joiner, "copes")
     wf.connect(glm, "varcopes", joiner, "varcopes")
-
+    
     def join_copes(copes, varcopes):
         """Has to be flexible enough to handle multiple runs
 
         Length of copes/varcopes should equal number of conditions
         """
-        copes = [list(cope) for cope in zip(*copes)]
-        varcopes = [list(varc) for varc in zip(*varcopes)]
-        return copes, varcopes
 
+        # if sublists, multiple contrasts
+        if all(isinstance(i, list) for i in copes):
+            copes = [list(cope) for cope in zip(*copes)]
+            varcopes = [list(varc) for varc in zip(*varcopes)]
+        else:
+            copes = [copes]
+            varcopes = [varcopes]
+
+        return copes, varcopes
+    
     copesjoin = Node(Function(function=join_copes,
                                 output_names=["copes", "varcopes"]),
                        name='copesjoiner')
     wf.connect(joiner, "copes", copesjoin, "copes")
     wf.connect(joiner, "varcopes", copesjoin, "varcopes")
-
+    
     # fixed_effects to combine stats across runs
     fixed_fx = create_fixed_effects_flow()
-    fixed_fx.get_node("l2model").inputs.num_copes = len(runs)
+    fixed_fx.config['execution']['crashfile_format'] = 'txt'
 
+    fixed_fx.get_node("l2model").inputs.num_copes = len(runs)
+    
     # use the first mask since they should all be in same space
-    pickfirst = lambda x: x[0]
+    pickfirst = lambda x: x[0] if not isinstance(x, str) else x
 
     wf.connect(joiner, ("mask_files", pickfirst), fixed_fx, "flameo.mask_file")
     wf.connect(joiner, "dof_file", fixed_fx, "inputspec.dof_files")
     wf.connect(copesjoin, "copes", fixed_fx, "inputspec.copes")
     wf.connect(copesjoin, "varcopes", fixed_fx, "inputspec.varcopes")
-
+    
     def substitutes(contrasts):
         """Datasink output path substitutes"""
         subs = []
         for i, con in enumerate(contrasts):
             # replace annoying chars in filename
             name = con[0].replace(" ", "").replace(">", "_gt_").lower()
-
+            
             subs.append(('_flameo%d/cope1.' % i, '%s_cope.' % name))
             subs.append(('_flameo%d/varcope1.' % i, '%s_varcope.' % name))
             subs.append(('_flameo%d/zstat1.' % i, '%s_zstat.' % name))
             subs.append(('_flameo%d/tstat1.' % i, '%s_tstat.' % name))
         return subs
-
-
+            
+            
     gensubs = Node(Function(function=substitutes), name="substitute-gen")
     wf.connect(contrastgen, "contrasts", gensubs, "contrasts")
-
+            
     # stats should equal number of conditions...
     sinker = Node(DataSink(), name="datasink")
     sinker.inputs.base_directory = outdir
-
+    
     wf.connect(gensubs, "out", sinker, "substitutions")
     wf.connect(fixed_fx, "outputspec.zstats", sinker, "stats.mni.@zstats")
     wf.connect(fixed_fx, "outputspec.copes", sinker, "stats.mni.@copes")
@@ -265,7 +274,7 @@ def argparser():
     parser.add_argument('--version', action='version', version=__version__)
     parser.add_argument("bids_dir",
                         help="Root BIDS directory")
-    parser.add_argument("-f", dest="fmriprep_dir",
+    parser.add_argument("-f", dest="fmriprep_dir", 
                         help="Output directory of fmriprep")
     parser.add_argument("-s", dest="subjects", nargs="*",
                         help="List of subjects to process (default: all)")
@@ -281,42 +290,50 @@ def argparser():
                         help="Specify a sparse model")
     parser.add_argument("-p", dest="plugin",
                         help="Nipype plugin to use (default: MultiProc)")
+    parser.add_argument("--drop", dest="drop", type=int,
+                        help="Number of starting volumes (dummy scans) to remove")
     return parser
 
-def process_subject(layout, bids_dir, subj, task, fmriprep_dir, session, outdir, workdir, sparse):
+def process_subject(layout, bids_dir, subj, task, fmriprep_dir, 
+                    session, outdir, workdir, sparse, dropvols):
     """Grab information and start nipype workflow
     We want to parallelize runs for greater efficiency
-
+    
     """
-    runs = list(range(1, len(layout.get(subject=subj,
-                                        type="bold",
-                                        task=task,
+    runs = list(range(1, len(layout.get(subject=subj, 
+                                        type="bold", 
+                                        task=task, 
                                         extensions="nii.gz")) + 1))
 
     if not runs:
-        raise FileNotFoundError(
-            "No bold {} runs found for subject {}".format(task, subj)
-        )
+        return
 
     events = layout.get(subject=subj, type="events", task=task, return_type="file")
 
     # assumes TR is same across runs
-    epi = layout.get(subject=subj, type="bold", task=task, return_type="file")[0]
-    TR = layout.get_metadata(epi)["RepetitionTime"]
+    print(subj, task)
+    try:
+        epi = layout.get(subject=subj, type="bold", task=task, return_type="file")[0]
+        try:
+            TR = layout.get_metadata(epi)["RepetitionTime"]
+        except Exception as e:
+            print("Cannot find TR for", epi)
 
     # IF RESTING - not necessary
     # will result in entirely new pipeline...
-    if not events:
-        raise FileNotFoundError(
-            "No event files found for subject {}".format(subj)
-        )
+        if not events:
+            print("No event files found for ", subj)
 
-    suboutdir = op.join(outdir, 'sub-' + subj, task)
+        suboutdir = op.join(outdir, 'sub-' + subj, task)
+    
+        wf = create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs, 
+                                    suboutdir, events, session, TR, sparse, workdir, 
+                                    dropvols)
 
-    wf = create_firstlevel_workflow(bids_dir, subj, task, fmriprep_dir, runs,
-                                    suboutdir, events, session, TR, sparse, workdir)
+        return wf
+    except:
+        print("Cannot find ", task)
 
-    return wf
 
 def main(argv=None):
     parser = argparser()
@@ -325,7 +342,7 @@ def main(argv=None):
     if not op.exists(args.bids_dir):
         raise IOError("BIDS directory {} not found.".format(args.bids_dir))
 
-    fmriprep_dir = (args.fmriprep_dir if args.fmriprep_dir else
+    fmriprep_dir = (args.fmriprep_dir if args.fmriprep_dir else 
                     op.join(args.bids_dir, 'derivatives', 'fmriprep'))
 
     if not op.exists(fmriprep_dir):
@@ -335,17 +352,19 @@ def main(argv=None):
     if not op.exists(workdir):
         os.makedirs(workdir)
 
-    layout = BIDSLayout(args.bids_dir)
+    layout = BIDSLayout(args.bids_dir, exclude=["derivatives"])
 
-    tasks = (args.tasks if args.tasks else
+    tasks = (args.tasks if args.tasks else 
              [task for task in layout.get_tasks() if 'rest' not in task.lower()])
     subjects = args.subjects if args.subjects else layout.get_subjects()
 
 
     for subj in subjects:
         for task in tasks:
-            wf = process_subject(layout, args.bids_dir, subj, task, fmriprep_dir,
-                                 args.session, outdir, workdir, args.sparse)
+            wf = process_subject(layout, args.bids_dir, subj, task, fmriprep_dir, 
+                                 args.session, outdir, workdir, args.sparse, args.drop)
+            if not wf:
+                continue
 
             wf.config["execution"]["crashfile_format"] = "txt"
             wf.config["execution"]["parameterize_dirs"] = False
