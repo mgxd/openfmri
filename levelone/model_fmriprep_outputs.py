@@ -631,8 +631,7 @@ def main(argv=None):
     for subj in subjects:
         subj = subj[4:] if subj.startswith('sub-') else subj
         for task in tasks:
-            wf = process_subject(layout, args.bids_dir, args.model, subj, task, 
-                         
+            wf = process_subject(layout, args.bids_dir, args.model, subj, task,  
                                  fmriprep_dir, outdir, workdir, args.regressors,
                                  args.sparse, args.session, args.drop, args.fwhm, 
                                  args.highpass, args.lowpass)
